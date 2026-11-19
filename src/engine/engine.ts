@@ -716,13 +716,14 @@ export class Engine {
       ? p.hedgeUsd * (mark - p.hedgeEntry) / Math.max(0.0001, p.hedgeEntry)
       : p.hedgeUsd * (p.hedgeEntry - mark) / Math.max(0.0001, p.hedgeEntry)) * frac;
     const realized = contractPnl + hedgePnl;
-    this.realizePnl(accountId, realized, 1, realized > 0 ? 1 : 0);
     if (closeQty >= p.qty - 0.01) this.repo.positionDelete(accountId, evId);
     else {
       p.qty -= closeQty;
       p.hedgeUsd *= (1 - frac);
       this.repo.positionUpsert(accountId, p);
     }
+    // Sample equity after removing the position; otherwise the closed P&L is counted twice.
+    this.realizePnl(accountId, realized, 1, realized > 0 ? 1 : 0);
     this.log(user, accountId, "平仓", d.title, "PM + HL", `${Math.round(closeQty).toLocaleString("en-US")} 股按对手价平仓，实现盈亏 ${signedUsd(realized)}`);
     this.feed(accountId, { kind: "warn", title: "已平仓", detail: d.title, val: signedUsd(realized) });
     this.touch();
@@ -856,8 +857,9 @@ export class Engine {
       throw new EngineError("nothing_to_close", "该账户的执行台与持仓账本都已经是空的", 409);
     }
     const pnl = b.pnl;
-    this.realizePnl(accountId, pnl, b.rows.length, b.rows.filter(r => r.pnl > 0).length);
     this.repo.clearTradingState(accountId);
+    // Clear the book first so the equity sample sees only the realised amount, not the same P&L twice.
+    this.realizePnl(accountId, pnl, b.rows.length, b.rows.filter(r => r.pnl > 0).length);
     this.log(user, accountId, "全部平仓", "账户全组合", "PM + HL",
       `${legs} 条腿按对手价平仓，实现盈亏 ${signedUsd(pnl)}，账本清零`);
     this.feed(accountId, { kind: "warn", title: "账户全组合已平仓", detail: `${legs} 条腿`, val: signedUsd(pnl) });

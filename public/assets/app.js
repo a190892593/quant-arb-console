@@ -892,7 +892,7 @@ import { CONV as D, api, download } from "./store.js";
     }
     $("#kpi-dd").innerHTML = series.length > 1 ? "−" + Math.abs(dd90 * 100).toFixed(2) + '<i class="unit">%</i>' : "—";
     const realized = D.account.realizedPnl ?? 0;
-    $("#kpi-realized").textContent = signedUsd(realized, 0);
+    $("#kpi-realized").textContent = signedUsd(realized, 2);
     $("#kpi-realized").className = "kpi-v num " + (realized >= 0 ? "pos" : "neg");
     $("#kpi-trades").textContent = D.account.closedTrades ?? 0;
     $("#kpi-wins").textContent = D.account.wins ?? 0;
