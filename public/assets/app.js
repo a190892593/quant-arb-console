@@ -40,7 +40,11 @@ import { CONV as D, api, download } from "./store.js";
     reviews: [],
     orders: [],
     audit: [],
-    opp: { q: "", cat: "all", minEdge: 2.5, horizon: "all", onlyReady: false, sortKey: "edge", sortDir: "desc" }
+    opp: { q: "", cat: "all", minEdge: 2.5, horizon: "all", onlyReady: false, sortKey: "edge", sortDir: "desc" },
+    cols: (() => {
+      const base = { depth: true, hedge: true, conf: true, due: true, status: true };
+      try { return { ...base, ...(JSON.parse(localStorage.getItem("conv.cols") || "{}")) }; } catch { return base; }
+    })()
   };
 
   let ordSeq = 8841;
@@ -416,8 +420,13 @@ import { CONV as D, api, download } from "./store.js";
     const hedgeShort = d.delta >= 0;
     const scenarioRows = [];
     if (spot0 > 0 && strike > 0) {
-      const candidates = [-10, -5, 0, 5, 10].map(pct => ({ spot: spot0 * (1 + pct / 100), pct }));
-      if (Math.abs(strike / spot0 - 1) <= 0.3) candidates.push({ spot: strike, pct: (strike / spot0 - 1) * 100, strike: true });
+      const candidates = [-50, -20, -10, -5, 0, 5, 10, 20, 50, 100].map(pct => ({ spot: spot0 * (1 + pct / 100), pct }));
+      candidates.push({ spot: 0, pct: -100 });
+      if (Math.abs(strike / spot0 - 1) <= 0.6) {
+        candidates.push({ spot: strike, pct: (strike / spot0 - 1) * 100, strike: true });
+        candidates.push({ spot: strike * (1 - 1e-6), pct: (strike / spot0 - 1) * 100, strike: true, below: true });
+        candidates.push({ spot: strike * (1 + 1e-6), pct: (strike / spot0 - 1) * 100, strike: true, above: true });
+      }
       const seenSpots = new Set();
       for (const c of candidates.sort((a, z) => a.spot - z.spot)) {
         const key = Math.round(c.spot * 100) / 100;
@@ -428,22 +437,25 @@ import { CONV as D, api, download } from "./store.js";
         const hedgePnl = hedgeNotional * ((hedgeShort ? spot0 - c.spot : c.spot - spot0) / spot0);
         const total = contractPnl + hedgePnl;
         const nearStrike = Math.abs(c.spot / strike - 1) < 0.002;
-        const label = nearStrike ? "行权价" : Math.abs(c.pct) < 0.05 ? "持平" : (c.pct > 0 ? "+" : "") + c.pct.toFixed(0) + "%";
+        const label = nearStrike ? "行权价" : c.spot === 0 ? "归零" : Math.abs(c.pct) < 0.05 ? "持平" : (c.pct > 0 ? "+" : "") + c.pct.toFixed(0) + "%";
         scenarioRows.push({ spot: c.spot, label, yes, contractPnl, hedgePnl, total, pct: total / Math.max(1, D.equityNow) * 100 });
       }
     }
     const best = scenarioRows.reduce((a, r) => !a || r.total > a.total ? r : a, null);
     const worst = scenarioRows.reduce((a, r) => !a || r.total < a.total ? r : a, null);
     const expectedPnl = qty * d.net / 100;
+    const tailUnbounded = hedgeShort; // short perp loses without bound as the terminal spot rises
+    const rr = best && worst && worst.total < 0 ? best.total / Math.abs(worst.total) : null;
     const scenarioHtml = !scenarioRows.length
-      ? '<section class="dsection"><div class="dsection-h"><span class="eyebrow">两腿情景盈亏</span><small>—</small></div>' +
+      ? '<section class="dsection" id="dsec-scenario"><div class="dsection-h"><span class="eyebrow">两腿情景盈亏</span><small>—</small></div>' +
         '<p class="scenario-note">缺少行权价或标的价，无法生成情景表；计划本身仍可执行。</p></section>'
-      : '<section class="dsection">' +
+      : '<section class="dsection" id="dsec-scenario">' +
           '<div class="dsection-h"><span class="eyebrow">两腿情景盈亏</span><small>' + qty.toLocaleString("en-US") + " 股 · 到期结算</small></div>" +
           '<div class="scenario-summary">' +
             '<div><span>模型净期望</span><b class="' + (expectedPnl >= 0 ? "pos" : "neg") + '">' + signedUsd(expectedPnl, 0) + "</b><small>公允概率 " + (d.fair * 100).toFixed(1) + "%</small></div>" +
             '<div><span>表内最佳</span><b class="pos">' + (best ? signedUsd(best.total, 0) : "—") + "</b><small>" + (best ? best.label : "—") + "</small></div>" +
             '<div><span>表内最差</span><b class="neg">' + (worst ? signedUsd(worst.total, 0) : "—") + "</b><small>" + (worst ? worst.label : "—") + "</small></div>" +
+            '<div><span>盈亏比' + (rr != null ? " / 尾部" : "") + "</span><b class=\"" + (tailUnbounded || (rr != null && rr < 0.5) ? "neg" : "pos") + '">' + (tailUnbounded ? "−∞" : rr != null ? rr.toFixed(2) + "x" : "—") + "</b><small>" + (tailUnbounded ? "空头上行无上限" : rr != null ? "最佳 / 表内最差" : "—") + "</small></div>" +
           "</div>" +
           '<div class="scenario-table"><div class="sc-row head"><span>到期情景</span><span>合约腿</span><span>对冲腿</span><span>合计</span></div>' +
             scenarioRows.map(r =>
@@ -454,8 +466,12 @@ import { CONV as D, api, download } from "./store.js";
                 '<span class="sc-total"><b class="' + (r.total >= 0 ? "pos" : "neg") + '">' + signedUsd(r.total, 0) + "</b><small>" + (r.pct >= 0 ? "+" : "") + r.pct.toFixed(2) + "%</small></span>" +
               "</div>"
             ).join("") +
+            (tailUnbounded ? '<div class="sc-row"><span class="sc-k"><span class="chip chip-neg">TAIL</span><b>S → ∞</b><small>无上限</small></span><span class="sc-num">—</span><span class="sc-num neg">−∞</span><span class="sc-total"><b class="neg">−∞</b><small>空头亏损不封顶</small></span></div>' : "") +
           "</div>" +
-          '<p class="scenario-note">按建议数量 ' + qty.toLocaleString("en-US") + " 股：合约腿到期按 0/1 结算，对冲腿按到期标的价平仓；不含资金费与平仓滑点（已计入净边成本）。建议数量已按盘口占比、单笔净值、集中度、场所/结算/HL 限额取最小值。" +
+          '<p class="scenario-note">' + (tailUnbounded
+            ? '<b class="neg">该结构卖出上行尾部：标的越涨，永续空头亏损越大，理论上没有上限。</b> 这不是结算保本套利；只有用看涨期权/价差封顶后才能把最大亏损变成有限值。'
+            : "对冲腿为做多永续，上行方向收益不封顶；最大亏损出现在标的归零。") +
+          " 按建议数量 " + qty.toLocaleString("en-US") + " 股：合约腿到期按 0/1 结算，对冲腿按到期标的价平仓；不含资金费与平仓滑点（已计入净边成本）。建议数量已按盘口占比、单笔净值、集中度、场所/结算/HL 限额取最小值。" +
           (model.kind === "touch" ? " 触碰型为路径依赖，表中按到期价是否越过行权价近似。" : "") + "</p>" +
         "</section>";
 
@@ -472,8 +488,15 @@ import { CONV as D, api, download } from "./store.js";
         "</div>" +
       "</div>" +
       '<div class="drawer-b">' +
+        '<div class="drawer-tabs" id="drawer-tabs" role="tablist" aria-label="机会拆解章节">' +
+          '<button class="drawer-tab is-on" data-drawer-goto="price">定价</button>' +
+          '<button class="drawer-tab" data-drawer-goto="cost">成本</button>' +
+          '<button class="drawer-tab" data-drawer-goto="plan">计划</button>' +
+          '<button class="drawer-tab" data-drawer-goto="scenario">情景</button>' +
+          '<button class="drawer-tab" data-drawer-goto="risk">风险</button>' +
+        "</div>" +
 
-        '<section class="dsection">' +
+        '<section class="dsection" id="dsec-price">' +
           '<div class="dsection-h"><span class="eyebrow">概率标尺</span><small>市场卖价 vs HL 公允 · 0–100¢</small></div>' +
           '<div class="ruler">' +
             '<div class="ruler-track"></div>' +
@@ -489,7 +512,7 @@ import { CONV as D, api, download } from "./store.js";
           "</div>" +
         "</section>" +
 
-        '<section class="dsection">' +
+        '<section class="dsection" id="dsec-cost">' +
           '<div class="dsection-h"><span class="eyebrow">净边拆解</span><small>单位 bps · 相对合约面值</small></div>' +
           '<div class="decomp">' +
             '<div class="dc-row"><span class="dc-k">毛概率差</span><span class="dc-bar"><i style="width:100%"></i></span>' +
@@ -516,7 +539,7 @@ import { CONV as D, api, download } from "./store.js";
             " 成本按两腿同时成交估算。</span></p>" +
         "</section>" +
 
-        '<section class="dsection">' +
+        '<section class="dsection" id="dsec-plan">' +
           '<div class="dsection-h"><span class="eyebrow">两腿执行计划</span><small>' + qty.toLocaleString("en-US") + " 股 · 盘口 " + manualDepthPct + "% / 净值 " + maxOrderPct + "% / 限额取最小</small></div>" +
           '<div class="plan">' +
             '<div class="plan-leg">' +
@@ -535,7 +558,7 @@ import { CONV as D, api, download } from "./store.js";
 
         scenarioHtml +
 
-        '<section class="dsection">' +
+        '<section class="dsection" id="dsec-risk">' +
           '<div class="dsection-h"><span class="eyebrow">结算与模型风险</span><small>模型 lognormal-iv v3.2</small></div>' +
           '<div class="notes">' +
             note("来源", "结算价取自 " + esc(d.src) + "，UMA 乐观预言机有 2 小时争议窗口；争议期间头寸无法提前退出。") +
@@ -565,6 +588,11 @@ import { CONV as D, api, download } from "./store.js";
     document.body.classList.add("has-drawer");
     $("#drawer").focus();
     drawerUntrap = trapFocus($("#drawer"), prevFocus);
+    $$("#drawer-tabs [data-drawer-goto]").forEach(btn => btn.addEventListener("click", () => {
+      const section = $("#dsec-" + btn.dataset.drawerGoto);
+      if (section) section.scrollIntoView({ behavior: "smooth", block: "start" });
+      $$("#drawer-tabs [data-drawer-goto]").forEach(b => b.classList.toggle("is-on", b === btn));
+    }));
     if (app.route === "scanner") history.replaceState(null, "", "#/scanner/" + id);
 
     const close = () => closeDrawer(prevFocus);
@@ -1272,6 +1300,20 @@ import { CONV as D, api, download } from "./store.js";
   }
 
   /* ---------------- scanner ---------------- */
+  function applyCols() {
+    const table = $("#opp-table");
+    if (!table) return;
+    const keys = ["depth", "hedge", "conf", "due", "status"];
+    for (const k of keys) table.classList.toggle("hide-" + k, app.cols[k] === false);
+    const btn = $("#col-btn");
+    if (btn) btn.textContent = "列显示 " + keys.filter(k => app.cols[k] !== false).length + "/" + keys.length;
+    requestAnimationFrame(() => {
+      const scroller = $("#view-scanner .tbl-scroll");
+      const hint = $(".tbl-scroll-hint");
+      if (hint && scroller) hint.hidden = scroller.scrollWidth <= scroller.clientWidth + 1;
+    });
+  }
+
   function filterRows() {
     const o = app.opp;
     let rows = computed();
@@ -1364,6 +1406,7 @@ import { CONV as D, api, download } from "./store.js";
       th.classList.toggle("is-asc", k === app.opp.sortKey && app.opp.sortDir === "asc");
       if (k) th.setAttribute("aria-sort", k === app.opp.sortKey ? (app.opp.sortDir === "asc" ? "ascending" : "descending") : "none");
     });
+    applyCols();
     renderNav();
   }
 
@@ -2082,6 +2125,31 @@ import { CONV as D, api, download } from "./store.js";
     e.currentTarget.setAttribute("aria-checked", String(app.opp.onlyReady));
     renderTable();
   });
+
+  const colMenu = $("#col-menu");
+  const colPop = $("#col-menu-pop");
+  const colBtn = $("#col-btn");
+  const setColMenu = open => {
+    if (!colPop || !colBtn) return;
+    colPop.hidden = !open;
+    colBtn.setAttribute("aria-expanded", String(open));
+  };
+  $$("#col-menu-pop [data-col]").forEach(input => { input.checked = app.cols[input.dataset.col] !== false; });
+  colBtn?.addEventListener("click", e => {
+    e.stopPropagation();
+    setColMenu(colPop.hidden);
+  });
+  colPop?.addEventListener("click", e => e.stopPropagation());
+  colPop?.addEventListener("change", e => {
+    const input = e.target.closest("[data-col]");
+    if (!input) return;
+    app.cols[input.dataset.col] = input.checked;
+    try { localStorage.setItem("conv.cols", JSON.stringify(app.cols)); } catch { /* storage may be disabled */ }
+    applyCols();
+  });
+  document.addEventListener("click", () => setColMenu(false));
+  document.addEventListener("keydown", e => { if (e.key === "Escape") setColMenu(false); });
+  window.addEventListener("resize", applyCols);
   $("#reset-filters").addEventListener("click", () => {
     app.opp = { q: "", cat: "all", minEdge: 2.5, horizon: "all", onlyReady: false, sortKey: "edge", sortDir: "desc" };
     $("#q").value = "";

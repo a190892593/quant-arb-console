@@ -79,22 +79,24 @@
     </nav>
 
     <div class="rail-foot">
-      <div class="engine">
-        <span class="dot ok" id="engine-dot"></span>
-        <div><b>引擎在线</b><small>v2.2 · 持仓同步 <span id="sync-latency">0.8s</span></small></div>
+      <div class="rail-status">
+        <div class="engine">
+          <span class="dot ok" id="engine-dot"></span>
+          <div><b>引擎在线</b><small>v2.2 · 持仓同步 <span id="sync-latency">0.8s</span></small></div>
+        </div>
+        <div class="user">
+          <span class="avatar" id="user-avatar">L</span>
+          <div class="user-id"><b id="user-name">林 · 自营</b><small id="user-email">lin@convergence.local</small></div>
+          <button class="icon-btn" id="admin-btn" aria-label="管理后台" title="管理后台" hidden>
+            <svg class="ic"><use href="#i-sliders"/></svg>
+          </button>
+          <button class="icon-btn" id="logout-btn" aria-label="退出登录" title="退出登录">
+            <svg class="ic"><use href="#i-power"/></svg>
+          </button>
+        </div>
+        <a class="rail-note rail-admin-link" id="admin-link" href="#/admin" hidden>进入管理 →</a>
+        <p class="rail-note" id="data-mode-note">正在连接行情…</p>
       </div>
-      <div class="user">
-        <span class="avatar" id="user-avatar">L</span>
-        <div class="user-id"><b id="user-name">林 · 自营</b><small id="user-email">lin@convergence.local</small></div>
-        <button class="icon-btn" id="admin-btn" aria-label="管理后台" title="管理后台" hidden>
-          <svg class="ic"><use href="#i-sliders"/></svg>
-        </button>
-        <button class="icon-btn" id="logout-btn" aria-label="退出登录" title="退出登录">
-          <svg class="ic"><use href="#i-power"/></svg>
-        </button>
-      </div>
-      <a class="rail-note rail-admin-link" id="admin-link" href="#/admin" hidden>进入管理 →</a>
-      <p class="rail-note" id="data-mode-note">正在连接行情…</p>
     </div>
   </aside>
 
@@ -436,11 +438,21 @@
               <span>仅可执行</span>
               <button class="switch switch-sm" id="only-ready" role="switch" aria-checked="false" aria-label="仅显示可执行机会"><span class="knob"></span></button>
             </label>
+            <div class="col-menu" id="col-menu">
+              <button class="chip chip-btn" id="col-btn" type="button" aria-haspopup="true" aria-expanded="false">列显示 ▾</button>
+              <div class="col-menu-pop" id="col-menu-pop" hidden>
+                <label><input type="checkbox" data-col="depth" checked> 可成交 / 盘口</label>
+                <label><input type="checkbox" data-col="hedge" checked> 对冲腿</label>
+                <label><input type="checkbox" data-col="conf" checked> 置信度</label>
+                <label><input type="checkbox" data-col="due" checked> 到期</label>
+                <label><input type="checkbox" data-col="status" checked> 状态</label>
+              </div>
+            </div>
           </div>
         </div>
 
         <div class="tbl-summary">
-          <span>显示 <b class="num" id="sum-count">28</b> 条 · 盘口合计 <b class="num" id="sum-depth">$4.21M</b> · 预期净边 <b class="num pos" id="sum-edge">$182,400</b></span>
+          <span>显示 <b class="num" id="sum-count">28</b> 条 · 盘口合计 <b class="num" id="sum-depth">$4.21M</b> · 预期净边 <b class="num pos" id="sum-edge">$182,400</b> <span class="tbl-scroll-hint">↔ 可横向滚动</span></span>
           <span class="hint">点击任意行查看定价拆解与两腿计划</span>
         </div>
 
