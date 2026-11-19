@@ -2,6 +2,7 @@ import type { Repository } from "./db/repository.js";
 import type { MarketService } from "./market/service.js";
 import type { Engine } from "./engine/engine.js";
 import type { AccountId, User } from "./domain/types.js";
+import { derive } from "./domain/pricing.js";
 import { publicConfig, liveTradingConfigured } from "./config.js";
 import { dailyLossPct, getSettings, totalEquity } from "./settings.js";
 import { clock, dateStr, weekday } from "./util.js";
@@ -34,6 +35,20 @@ export function buildState(
   const live = liveTradingConfigured();
   const positions = repo.positionsAll(selected.id);
   const exposureByEvent = new Map(book.rows.map(r => [r.evId, r.cost]));
+  const orders = engine.orders(selected.id);
+  const reviews = engine.reviews(selected.id);
+  const calendar = repo.calendarAll(selected.id).map(c => ({ ...c, exposure: exposureByEvent.get(c.evId) ?? c.exposure }));
+  const signals = engine.derived(selected.id);
+  // Held/working events may no longer pass the account's eligibility filter (e.g. a stale quote
+  // refreshed). They still need a title and greeks in the book views, so ship a small lookup set.
+  const referenced = new Set([...positions, ...orders, ...reviews, ...calendar].map(x => x.evId));
+  const signalIds = new Set(signals.map(s => s.id));
+  const bookEvents = market.events
+    .filter(ev => referenced.has(ev.id) && !signalIds.has(ev.id))
+    .map(ev => derive(ev, {
+      market: market.market, cost: global.cost, minEdge: selected.minEdge,
+      strategy: selected.id, quoteAgeMs: ev.quoteAgeMs
+    }));
   const equity = selected.equity;
   const portfolioEquity = totalEquity(accounts);
 
@@ -94,17 +109,18 @@ export function buildState(
     },
     venues: [market.hlStatus, market.pmStatus],
     market: market.market,
-    events: engine.derived(selected.id),
+    events: signals,
+    bookEvents,
     positions,
     book,
-    orders: engine.orders(selected.id),
-    reviews: engine.reviews(selected.id),
+    orders,
+    reviews,
     audit: engine.audit(selected.id, 200),
     limits,
     rules,
     feed: repo.feedAll(selected.id, 12),
     riskEvents: repo.riskEventsAll(selected.id, 12),
-    calendar: repo.calendarAll(selected.id).map(c => ({ ...c, exposure: exposureByEvent.get(c.evId) ?? c.exposure })),
+    calendar,
     equity: repo.equityAll(selected.id)
   };
 }

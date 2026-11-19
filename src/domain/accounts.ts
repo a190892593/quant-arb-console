@@ -48,7 +48,7 @@ export const ACCOUNT_DEFS: readonly AccountDef[] = [
     name: "报价滞后",
     short: "LAG",
     desc: "Hyperliquid 标记价已经移动，Polymarket 报价仍是数秒前的陈旧盘口。",
-    logic: "抢陈旧卖价并立刻用永续对冲，吃报价追平前的瞬时差；持有以分钟计。",
+    logic: "只做 14 天内事件；抢陈旧卖价并立刻用永续对冲，吃报价追平前的瞬时差；持有以分钟计。",
     holdLabel: "秒–分钟",
     paperFillMs: 600,
     maxOpen: 2,
@@ -114,6 +114,7 @@ export function mergeAccountSettings(stored?: Array<Partial<AccountSettings>> | 
 }
 
 export const LATENCY_MIN_AGE_MS = 6_000;
+export const LATENCY_MAX_DAYS = 14;
 export const CONVERGE_MAX_DAYS = 3;
 export const CONVERGE_MIN_FAIR = 0.82;
 
@@ -128,6 +129,7 @@ export function eligibleFor(id: AccountId, ev: EventContract, market: Market, no
     case "converge":
       return days <= CONVERGE_MAX_DAYS && ev.fair >= CONVERGE_MIN_FAIR && ev.fair <= 0.995;
     case "latency": {
+      if (days > LATENCY_MAX_DAYS) return false;
       const gross = (ev.fair - (ev.ask + ev.bid) / 2) * 100;
       const age = ev.quoteAgeMs ?? 0;
       const moved = ev.quoteRefPx && market[ev.und]?.px

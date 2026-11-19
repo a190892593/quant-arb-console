@@ -1477,7 +1477,7 @@ body.has-drawer .toasts { right: auto; left: 20px; }
   .top-clock em { display: none; }
   .acct-btn { height: 32px; padding: 0 7px; gap: 6px; }
   .acct-btn-meta { display: none; }
-  .acct-menu { right: -56px; width: min(300px, calc(100vw - 24px)); }
+  .acct-menu { left: 0; right: auto; width: min(300px, calc(100vw - 24px)); }
   .acct-card { padding: 14px; }
   .acct-card-eq { font-size: 24px; }
   .acct-card-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }

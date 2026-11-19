@@ -21,6 +21,7 @@ const emptyState = {
   venues: [],
   market: {},
   events: [],
+  bookEvents: [],
   positions: [],
   book: { rows: [], face: 0, cost: 0, hedge: 0, target: 0, pnl: 0, margin: 0, settle7: 0, maxCost: 0, byUnd: {}, netDelta: 0, unhedged: 0, undehedged: 0, nowMs: Date.now() },
   orders: [],
@@ -68,7 +69,7 @@ function applyState(next) {
   state.portfolio = { ...emptyState.portfolio, ...(next.portfolio || {}) };
   state.engine = { ...(next.engine || {}) };
   state.accounts = next.accounts || [];
-  derived = new Map((state.events || []).map(e => [e.id, e]));
+  derived = new Map([...(state.events || []), ...(state.bookEvents || [])].map(e => [e.id, e]));
   clockSkew = state.serverTime - Date.now();
   receivedAt = Date.now();
   lastStateVersion = state.version;
@@ -217,6 +218,8 @@ export const CONV = {
   /* market / data */
   get market() { return state.market; },
   get events() { return state.events; },
+  get bookEvents() { return state.bookEvents || []; },
+  event(id) { return derived.get(id) || null; },
   get positions() { return state.positions; },
   get orders() { return state.orders; },
   get reviews() { return state.reviews; },

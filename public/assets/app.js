@@ -302,7 +302,7 @@ import { CONV as D, api, download } from "./store.js";
 
   /* ---------------- drawer ---------------- */
   function openDrawer(id) {
-    const ev = D.events.find(e => e.id === id);
+    const ev = D.event(id);
     if (!ev) return;
     const d = D.derive(ev);
     app.sel = id;
@@ -652,6 +652,19 @@ import { CONV as D, api, download } from "./store.js";
     if ($("#pos-eyebrow")) $("#pos-eyebrow").textContent = "POSITIONS · " + label;
     if ($("#risk-eyebrow")) $("#risk-eyebrow").textContent = "RISK · " + label;
     if ($("#scan-acct-chip")) $("#scan-acct-chip").textContent = label;
+    if ($("#scan-sub")) $("#scan-sub").textContent = a.logic;
+    if ($("#exec-sub")) $("#exec-sub").textContent = label + " 的两腿执行：只处理该账户的订单，单笔校验该账户限额；熔断也只停该账户。";
+    if ($("#pos-sub")) $("#pos-sub").textContent = label + " 的持仓与对冲；成本、保证金、盈亏与降仓线均按该账户独立核算。";
+    if ($("#risk-sub")) $("#risk-sub").textContent = label + " 的 " + app.limits.length + " 项限额、" + app.rules.length + " 条规则与熔断开关；与其他三个账户完全隔离。";
+    const cap = $("#scan-cap");
+    if (cap) {
+      cap.hidden = false;
+      const full = a.positions >= a.maxOpen;
+      cap.textContent = full
+        ? "持仓 " + a.positions + "/" + a.maxOpen + " · 已满仓，仅推送"
+        : "持仓 " + a.positions + "/" + a.maxOpen + " · 可开 " + (a.maxOpen - a.positions) + " 仓";
+      cap.className = "chip " + (full ? "chip-warn" : "chip-mute");
+    }
     const railTop = $(".acct-top .eyebrow");
     if (railTop) railTop.textContent = "当前账户 · " + code;
     const mode = $("#acct-mode");
@@ -897,10 +910,11 @@ import { CONV as D, api, download } from "./store.js";
     // live account / system facts
     const pm = D.venues.find(v => v.id === "polymarket");
     const hl = D.venues.find(v => v.id === "hyperliquid");
-    const upDays = Math.max(1, Math.ceil((Date.now() - (D.engine.startedAt || Date.now())) / 86400000));
+    const upMin = Math.max(1, Math.round((Date.now() - (D.engine.startedAt || Date.now())) / 60000));
+    const upText = upMin < 60 ? upMin + " 分钟" : Math.floor(upMin / 60) + " 小时 " + (upMin % 60) + " 分";
     const connected = D.venues.filter(v => v.state === "ok").length;
     const acctSub = $("#acct-sub");
-    if (acctSub) acctSub.innerHTML = '<span class="dot ' + (connected ? "ok" : "warn") + '"></span>' + connected + " 个场所已接入 · 运行 " + upDays + " 天";
+    if (acctSub) acctSub.innerHTML = '<span class="dot ' + (connected ? "ok" : "warn") + '"></span>' + connected + " 个场所已接入 · 运行 " + upText;
     const sysScan = $("#sys-scan");
     if (sysScan) sysScan.textContent = (D.settings.scanIntervalMs / 1000).toFixed(1) + "s";
     const sysLatency = $("#sys-latency");
@@ -1193,7 +1207,7 @@ import { CONV as D, api, download } from "./store.js";
     const tbody = $("#opp-body");
     if (!tbody.children.length) return;
     Array.from(tbody.children).forEach(tr => {
-      const ev = D.events.find(e => e.id === tr.dataset.id);
+      const ev = D.event(tr.dataset.id);
       if (!ev) return;
       const d = D.derive(ev);
       const set = (f, txt) => { const n = tr.querySelector('[data-f="' + f + '"]'); if (n) n.textContent = txt; };
@@ -1224,7 +1238,7 @@ import { CONV as D, api, download } from "./store.js";
 
   function updateRadarCells() {
     $$("#radar-list .radar-row").forEach(row => {
-      const ev = D.events.find(e => e.id === row.dataset.open);
+      const ev = D.event(row.dataset.open);
       if (!ev) return;
       const d = D.derive(ev);
       const ask = row.querySelector('[data-radar="ask"]');
@@ -1258,7 +1272,7 @@ import { CONV as D, api, download } from "./store.js";
     const host = $("#order-list");
     if (!host) return;
     host.innerHTML = app.orders.map(o => {
-      const ev = D.events.find(e => e.id === o.evId);
+      const ev = D.event(o.evId) || { id: o.evId, title: o.evId, cat: "—", und: "—", due: "", days: 0, ask: 0, fair: 0, delta: 0, quoteAgeMs: 0 };
       const d = D.derive(ev);
       const hedge = o.legs[1];
       const gap = Math.max(0, hedge.qty - hedge.filled);
@@ -1324,7 +1338,7 @@ import { CONV as D, api, download } from "./store.js";
     const host = $("#review-list");
     if (!host) return;
     host.innerHTML = app.reviews.map(r => {
-      const ev = D.events.find(e => e.id === r.evId);
+      const ev = D.event(r.evId) || { title: r.evId };
       return '<article class="review" data-review="' + r.id + '">' +
         '<div class="review-top"><div>' +
           '<div class="review-reason"><svg class="ic"><use href="#i-alert"/></svg>' + esc(r.kind) + " · " + r.id + "</div>" +
@@ -1558,16 +1572,17 @@ import { CONV as D, api, download } from "./store.js";
   function renderRiskCalendar() {
     const now = D.now();
     const rows = D.calendar.map(c => {
-      const ev = D.events.find(e => e.id === c.evId);
+      const ev = D.event(c.evId) || { title: c.evId, due: "", und: "" };
       const pos = D.positions.find(p => p.evId === c.evId);
       const view = pos ? D.positionView(pos) : null;
       const exposure = view ? view.cost : c.exposure;
-      const days = (Date.parse(ev.due) - now) / 86400000;
+      const due = Date.parse(ev.due);
+      const days = Number.isFinite(due) ? (due - now) / 86400000 : 0;
       return { ev, days, exposure, note: c.note };
     }).sort((a, b) => a.days - b.days);
 
     $("#risk-calendar").innerHTML = rows.map(r =>
-      '<div class="cal-row"><span class="cal-date">' + dateShort(Date.parse(r.ev.due)) + "<small>" + (r.days < 1 ? "今日" : Math.round(r.days) + " 天后") + "</small></span>" +
+      '<div class="cal-row"><span class="cal-date">' + (r.ev.due ? dateShort(Date.parse(r.ev.due)) : "—") + "<small>" + (r.days < 1 ? "今日" : Math.round(r.days) + " 天后") + "</small></span>" +
       '<span class="cal-title">' + esc(r.ev.title) + "<small>" + esc(r.note) + "</small></span>" +
       '<span class="cal-exp">' + compactUsd(r.exposure) + "<small>成本暴露</small></span></div>"
     ).join("");
@@ -1898,11 +1913,12 @@ import { CONV as D, api, download } from "./store.js";
     if (flat) {
       const o = app.orders.find(x => x.id === flat.dataset.orderFlat);
       if (!o) return;
+      const ev = D.event(o.evId) || { title: o.evId, und: "—" };
       openModal({
         title: "立即平仓",
-        sub: o.id + " · " + (D.events.find(e => e.id === o.evId) || {}).title,
+        sub: o.id + " · " + ev.title,
         body: '<div class="kvbox"><div><span>合约腿</span><b>卖出 ' + Math.round(o.legs[0].filled).toLocaleString("en-US") + " YES</b></div>" +
-          "<div><span>对冲腿</span><b>平掉 " + Math.round(o.legs[1].filled).toLocaleString("en-US") + " " + (D.events.find(e => e.id === o.evId) || {}).und + "-PERP</b></div>" +
+          "<div><span>对冲腿</span><b>平掉 " + Math.round(o.legs[1].filled).toLocaleString("en-US") + " " + ev.und + "-PERP</b></div>" +
           '<div class="total"><span>预计滑点</span><b>8–14 bps</b></div></div>' +
           '<div class="warn-box"><svg class="ic"><use href="#i-alert"/></svg><p>平仓会同时释放两条腿；若其中一条腿失败，系统会保留另一条并在 30 秒内重试。</p></div>',
         actions: [
@@ -1925,7 +1941,7 @@ import { CONV as D, api, download } from "./store.js";
     const id = (take || flat || ignore).dataset[take ? "reviewTake" : flat ? "reviewFlat" : "reviewIgnore"];
     const r = app.reviews.find(x => x.id === id);
     if (!r) return;
-    const ev = D.events.find(x => x.id === r.evId) || { title: r.evId };
+    const ev = D.event(r.evId) || { title: r.evId };
     if (take) {
       openModal({
         title: "接管 " + r.id,
@@ -2052,7 +2068,7 @@ import { CONV as D, api, download } from "./store.js";
             void api.post("/api/positions", { eventId: id, sizeUsd: size })
               .then(() => {
                 syncFromState(); renderPositions(); renderTable(); renderOverview(); renderNav();
-                const ev = D.events.find(e => e.id === id);
+                const ev = D.event(id);
                 toast("组合已建立", (ev ? ev.title : id) + " 两条腿已提交，头寸已进入持仓账本。");
                 go("positions");
               })
@@ -2061,7 +2077,8 @@ import { CONV as D, api, download } from "./store.js";
       ],
       onMount: function (modal) {
         const update = () => {
-          const ev = D.events.find(e => e.id === $("#np-event", modal).value);
+          const ev = D.event($("#np-event", modal).value);
+          if (!ev) return;
           const d = D.derive(ev);
           const size = Number($("#np-size", modal).value) || 0;
           const qty = Math.floor(size / d.ask / 100) * 100;

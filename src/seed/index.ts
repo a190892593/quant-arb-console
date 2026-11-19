@@ -5,7 +5,7 @@ import type {
   AccountId, AuditEntry, CalendarItem, DerivedEvent, EquityPoint, FeedItem, Limit, Order, Position, Review, RiskEvent, Rule
 } from "../domain/types.js";
 import { DEFAULT_LIMITS, DEFAULT_RULES } from "../domain/risk.js";
-import { ACCOUNT_DEFS, accountDef, eligibleFor } from "../domain/accounts.js";
+import { ACCOUNT_DEFS, accountDef, eligibleFor, LATENCY_MAX_DAYS } from "../domain/accounts.js";
 import { accountsAll, getSettings, saveSettings } from "../settings.js";
 import { clock, dateShort, hhmm, mulberry32, simParts } from "../util.js";
 import { hashPassword } from "../auth.js";
@@ -103,7 +103,11 @@ function pickEvents(market: MarketService, repo: Repository, accountId: AccountI
 }
 
 function forceStaleQuotes(market: MarketService, n = 4): void {
-  const demos = market.events.filter(e => e.source === "demo" && Date.parse(e.due) > Date.now() + DAY);
+  const now = Date.now();
+  const demos = market.events.filter(e => {
+    const due = Date.parse(e.due);
+    return e.source === "demo" && due > now + DAY && due <= now + LATENCY_MAX_DAYS * DAY;
+  });
   const step = Math.max(1, Math.floor(demos.length / n));
   for (let i = 0; i < n && i * step < demos.length; i++) {
     const ev = demos[i * step]!;

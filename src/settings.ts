@@ -44,13 +44,14 @@ export function accountsAll(repo: Repository): AccountSettings[] {
   const stored = repo.settingGet<Array<Partial<AccountSettings>> | null>("accounts", null);
   if (!stored) {
     const legacy = repo.settingGet<{ auto?: boolean; kill?: boolean; minEdge?: number; paperFillMs?: number } | null>("app", null);
-    const seeded = defaultAccountSettings().map(a => ({
+    // Only S1 inherits the old single-book switches; S2–S4 start on their own strategy defaults.
+    const seeded = defaultAccountSettings().map(a => a.id !== "prob" ? a : {
       ...a,
       auto: typeof legacy?.auto === "boolean" ? legacy.auto : a.auto,
       kill: typeof legacy?.kill === "boolean" ? legacy.kill : a.kill,
       minEdge: Number.isFinite(legacy?.minEdge) ? Number(legacy!.minEdge) : a.minEdge,
       paperFillMs: Number.isFinite(legacy?.paperFillMs) ? Number(legacy!.paperFillMs) : a.paperFillMs
-    }));
+    });
     repo.settingSet("accounts", seeded);
     return seeded;
   }

@@ -367,9 +367,10 @@
           <div class="page-head-main">
             <div class="eyebrow" id="scan-eyebrow">SCANNER · 概率偏差</div>
             <h1>机会扫描</h1>
-            <p class="page-sub">用 Hyperliquid 波动率曲面反推数字期权价格，与 Polymarket 最优卖价比较，扣除两腿成本后排序。</p>
+            <p class="page-sub" id="scan-sub">用 Hyperliquid 波动率曲面反推数字期权价格，与 Polymarket 最优卖价比较，扣除两腿成本后排序。</p>
           </div>
           <div class="page-actions">
+            <span class="chip chip-mute" id="scan-cap" hidden></span>
             <span class="chip chip-accent" id="scan-acct-chip">S1 概率偏差</span>
             <div class="scan-pill">
               <span class="dot live"></span>
@@ -468,7 +469,7 @@
           <div class="page-head-main">
             <div class="eyebrow" id="exec-eyebrow">EXECUTION · 两腿执行</div>
             <h1>执行台</h1>
-            <p class="page-sub">合约腿成交后 800ms 内完成永续对冲；任一腿偏离计划都会被标记，超过 5 分钟交还人工。</p>
+            <p class="page-sub" id="exec-sub">合约腿成交后 800ms 内完成永续对冲；任一腿偏离计划都会被标记，超过 5 分钟交还人工。</p>
           </div>
           <div class="page-actions">
             <button class="btn btn-ghost" id="flatten-all-btn">全部平仓</button>
@@ -533,7 +534,7 @@
           <div class="page-head-main">
             <div class="eyebrow" id="pos-eyebrow">POSITIONS · 敞口</div>
             <h1>持仓</h1>
-            <p class="page-sub">每个事件合约都配一条永续对冲腿；比例低于 90% 标黄，低于 75% 自动降仓。</p>
+            <p class="page-sub" id="pos-sub">每个事件合约都配一条永续对冲腿；比例低于 90% 标黄，低于 75% 自动降仓。</p>
           </div>
           <div class="page-actions">
             <button class="btn btn-ghost" id="hedge-all-btn">对齐所有对冲腿</button>
@@ -590,7 +591,7 @@
           <div class="page-head-main">
             <div class="eyebrow" id="risk-eyebrow">RISK · 分级熔断</div>
             <h1>风控</h1>
-            <p class="page-sub">限额在成交前校验、成交后复核。任何一条规则触发都会降档，只有人工确认才能恢复满仓。</p>
+            <p class="page-sub" id="risk-sub">限额在成交前校验、成交后复核。任何一条规则触发都会降档，只有人工确认才能恢复满仓。</p>
           </div>
           <div class="page-actions">
             <span class="risk-state" id="risk-state"><span class="dot ok"></span>系统正常 · 全档运行</span>
