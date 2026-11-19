@@ -1071,12 +1071,38 @@ svg { display: block; }
 .mini-btn.ok { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
 
 .rule-list { padding: 4px 16px 10px; }
-.rule { display: flex; align-items: flex-start; gap: 12px; padding: 11px 0; }
+.rule-cat {
+  font-size: 9px; letter-spacing: .09em; text-transform: uppercase;
+  color: var(--txt-dim); padding: 12px 0 3px; font-weight: 700;
+}
+.rule-cat:first-child { padding-top: 2px; }
+.rule { display: flex; align-items: flex-start; gap: 12px; padding: 10px 0; }
 .rule + .rule { border-top: 1px solid oklch(0.42 0.012 255 / 0.14); }
 .rule-body { flex: 1; min-width: 0; }
 .rule-body b { display: block; font-size: 12px; font-weight: 500; color: var(--txt); }
 .rule-body span { display: block; font-size: 10.5px; color: var(--txt-dim); margin-top: 2px; line-height: 1.45; }
+.rule-side { display: flex; align-items: center; gap: 8px; flex: none; }
+.rule-param {
+  display: flex; align-items: center; gap: 4px;
+  height: 26px; padding: 0 6px;
+  background: var(--ink-950); border: 1px solid var(--line);
+  border-radius: var(--r-chip);
+}
+.rule-param input {
+  width: 58px; height: 22px; padding: 0; border: 0; outline: 0;
+  background: transparent; color: var(--txt-hi);
+  font-family: var(--font-mono); font-size: 11px; text-align: right;
+}
+.rule-param span { font-size: 9px; color: var(--txt-dim); min-width: 18px; }
+.rule-param:focus-within { border-color: var(--accent-line); }
+.rule-hard {
+  display: inline-block; margin-left: 5px; padding: 0 4px;
+  font-size: 8px; font-weight: 500; letter-spacing: .04em;
+  color: var(--warn); border: 1px solid var(--warn-soft); border-radius: 3px;
+  vertical-align: 1px;
+}
 .rule .switch { margin-top: 2px; }
+.rule-foot { padding: 0 16px 12px; font-size: 9.5px; line-height: 1.55; color: var(--txt-dim); }
 
 .calendar { padding: 6px 16px 10px; }
 .cal-row { display: grid; grid-template-columns: 64px minmax(0, 1fr) 96px; gap: 12px; align-items: center; padding: 9px 0; }
@@ -1509,6 +1535,8 @@ body.has-drawer .toasts { right: auto; left: 20px; }
   .sim-mini, .auto-mini { display: inline; }
   .sim-strip { flex-wrap: wrap; align-items: flex-start; }
   .sim-strip-copy { flex: 1 1 calc(100% - 80px); }
+  .rule { flex-wrap: wrap; }
+  .rule-side { width: 100%; justify-content: flex-end; }
   .auto-label { display: inline; font-size: 10px; }
   .top-clock em { display: none; }
   .acct-btn { height: 32px; padding: 0 7px; gap: 6px; }

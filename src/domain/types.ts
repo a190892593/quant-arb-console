@@ -293,6 +293,13 @@ export interface Rule {
   name: string;
   desc: string;
   on: boolean;
+  value?: number;
+  unit?: "days" | "pct" | "bps" | "usd" | "ms" | "shares" | "x" | "sec" | "score";
+  min?: number;
+  max?: number;
+  step?: number;
+  category?: string;
+  hard?: boolean;
 }
 
 export interface EquityPoint {

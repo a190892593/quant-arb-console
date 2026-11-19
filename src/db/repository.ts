@@ -5,6 +5,7 @@ import type {
   AccountId, AuditEntry, CalendarItem, EquityPoint, EventContract, FeedItem, Limit, Order, Position,
   Review, RiskEvent, Rule, User, UserRow
 } from "../domain/types.js";
+import { RULE_DEFS } from "../domain/risk.js";
 
 type SqlValue = string | number | null | bigint | Uint8Array;
 
@@ -84,7 +85,8 @@ CREATE TABLE IF NOT EXISTS rules (
   account_id TEXT NOT NULL,
   id TEXT NOT NULL,
   name TEXT NOT NULL, descr TEXT NOT NULL,
-  onoff INTEGER NOT NULL DEFAULT 1, sort INTEGER NOT NULL DEFAULT 0,
+  onoff INTEGER NOT NULL DEFAULT 1, value REAL,
+  sort INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (account_id, id)
 );
 CREATE TABLE IF NOT EXISTS equity (
@@ -118,7 +120,7 @@ interface AuditRow {
 interface FeedRow { account_id: string | null; t: string; kind: string; title: string; detail: string | null; val: string | null }
 interface RiskRow { account_id: string | null; t: string; level: string; title: string; detail: string | null; val: string | null }
 interface LimitRow { id: string; name: string; descr: string; value: number; kind: string; sort: number }
-interface RuleRow { id: string; name: string; descr: string; onoff: number; sort: number }
+interface RuleRow { id: string; name: string; descr: string; onoff: number; value: number | null; sort: number }
 interface CalendarRow { ev_id: string; exposure: number; note: string | null }
 interface SessionRow { id: string; user_id: string; csrf: string; created_at: number; expires_at: number }
 interface CountRow { n: number }
@@ -141,6 +143,10 @@ export class Repository {
     this.db = new DatabaseSync(file);
     this.migrateLegacy();
     this.db.exec(SCHEMA);
+    const ruleColumns = this.all<ColRow>("PRAGMA table_info(rules)");
+    if (ruleColumns.length && !ruleColumns.some(c => c.name === "value")) {
+      this.db.exec("ALTER TABLE rules ADD COLUMN value REAL");
+    }
     if (this.pendingLegacyCopy) this.copyLegacy();
   }
 
@@ -451,18 +457,41 @@ export class Repository {
     this.run("UPDATE limits SET value=? WHERE account_id=? AND id=?", value, accountId, id);
   }
   rulesAll(accountId: AccountId): Rule[] {
-    return this.all<RuleRow>("SELECT id,name,descr,onoff,sort FROM rules WHERE account_id=? ORDER BY sort", accountId)
-      .map(r => ({ id: r.id, name: r.name, desc: r.descr, on: !!r.onoff }));
+    const rows = this.all<RuleRow>("SELECT id,name,descr,onoff,value,sort FROM rules WHERE account_id=? ORDER BY sort", accountId);
+    const byId = new Map(rows.map(r => [r.id, r]));
+    return RULE_DEFS.map(def => {
+      const row = byId.get(def.id);
+      return {
+        ...def,
+        name: def.name,
+        desc: def.desc,
+        on: row ? !!row.onoff : def.on,
+        value: row?.value ?? def.value
+      };
+    });
+  }
+  rulesStored(accountId: AccountId): Rule[] {
+    return this.all<RuleRow>("SELECT id,name,descr,onoff,value,sort FROM rules WHERE account_id=? ORDER BY sort", accountId)
+      .map(r => ({ id: r.id, name: r.name, desc: r.descr, on: !!r.onoff, value: r.value ?? undefined }));
   }
   rulesReplace(accountId: AccountId, rules: Rule[]): void {
     this.tx(() => {
       this.run("DELETE FROM rules WHERE account_id=?", accountId);
-      const stmt = this.db.prepare("INSERT INTO rules(account_id,id,name,descr,onoff,sort) VALUES(?,?,?,?,?,?)");
-      rules.forEach((r, i) => stmt.run(accountId, r.id, r.name, r.desc, r.on ? 1 : 0, i));
+      const stmt = this.db.prepare("INSERT INTO rules(account_id,id,name,descr,onoff,value,sort) VALUES(?,?,?,?,?,?,?)");
+      rules.forEach((r, i) => stmt.run(accountId, r.id, r.name, r.desc, r.on ? 1 : 0, r.value ?? null, i));
     });
   }
+  ruleUpsert(accountId: AccountId, rule: Rule): void {
+    const sort = Math.max(0, RULE_DEFS.findIndex(d => d.id === rule.id));
+    this.run(
+      `INSERT INTO rules(account_id,id,name,descr,onoff,value,sort) VALUES(?,?,?,?,?,?,?)
+       ON CONFLICT(account_id,id) DO UPDATE SET onoff=excluded.onoff, value=excluded.value`,
+      accountId, rule.id, rule.name, rule.desc, rule.on ? 1 : 0, rule.value ?? null, sort
+    );
+  }
   ruleSet(accountId: AccountId, id: string, on: boolean): void {
-    this.run("UPDATE rules SET onoff=? WHERE account_id=? AND id=?", on ? 1 : 0, accountId, id);
+    const rule = this.rulesAll(accountId).find(r => r.id === id);
+    if (rule) this.ruleUpsert(accountId, { ...rule, on });
   }
 
   /* ---------------- equity / calendar ---------------- */

@@ -6,7 +6,7 @@ import type {
 } from "../domain/types.js";
 import { book as buildBook, derive } from "../domain/pricing.js";
 import { ACCOUNT_DEFS, accountDef, eligibleFor, isAccountId } from "../domain/accounts.js";
-import { checkOrder, limitUsage, validateLimitValue, DEFAULT_LIMITS, DEFAULT_RULES } from "../domain/risk.js";
+import { checkOrder, limitUsage, validateLimitValue, DEFAULT_LIMITS, DEFAULT_RULES, defaultRulesFor, ruleValue, ruleEnabled } from "../domain/risk.js";
 import { config, liveTradingConfigured } from "../config.js";
 import {
   accountsAll, accountSettings, dailyLossPct, getSettings, saveAccountSettings, saveSettings, type AppSettings
@@ -123,12 +123,15 @@ export class Engine {
     this.lastRehedgeAt = Date.now();
     for (const account of this.accounts()) {
       if (!account.enabled || account.kill) continue;
-      if (!this.rules(account.id).find(r => r.id === "gap-fill")?.on) continue;
+      const rules = this.rules(account.id);
+      if (!ruleEnabled(rules, "gap-fill")) continue;
+      const gapMin = ruleValue(rules, "gap-fill", 500);
+      const gapPct = ruleValue(rules, "gap-fill-pct", 3) / 100;
       const b = this.book(account.id);
       for (const row of b.rows) {
         if (row.target <= 0) continue;
         const drift = row.target - row.hedgeUsd;
-        const band = Math.max(500, row.target * 0.03);
+        const band = Math.max(gapMin, row.target * gapPct);
         if (Math.abs(drift) < band) continue;
         const p = this.repo.positionsAll(account.id).find(x => x.evId === row.evId);
         if (!p) continue;
@@ -173,8 +176,9 @@ export class Engine {
     if (!account.auto || account.kill || !account.enabled) return;
     if (!this.paperTradingEnabled()) return;
     if (!config.seedTestFixture && config.marketDataMode !== "demo" && this.market.pmStatus.state !== "ok") return;
+    const rules = this.rules(accountId);
     const last = this.lastAutoAt.get(accountId) ?? 0;
-    if (Date.now() - last < 60_000) return;
+    if (Date.now() - last < ruleValue(rules, "auto-cooldown-sec", 60) * 1000) return;
     const positions = this.repo.positionsAll(accountId);
     const open = this.repo.ordersAll(accountId).filter(o => o.status !== "filled" && o.status !== "failed");
     // maxOpen counts distinct events with exposure (held or in flight), not raw leg rows.
@@ -188,11 +192,15 @@ export class Engine {
     const best = candidates[0];
     if (!best) return;
     const equity = this.currentEquity(accountId);
-    const maxByDepth = Math.floor((best.depth * 0.4) / best.ask / 100) * 100;
-    const maxByEquity = Math.floor((equity * 0.06) / best.ask / 100) * 100;
-    const qty = Math.max(100, Math.min(maxByDepth, maxByEquity, 40_000 / best.ask));
+    const minQty = ruleValue(rules, "min-qty", 100);
+    const depthPct = ruleValue(rules, "depth-utilization-pct", 40) / 100;
+    const sizePct = ruleValue(rules, "auto-size-pct", 6) / 100;
+    const maxNotional = ruleValue(rules, "auto-max-notional", 40_000);
+    const maxByDepth = Math.floor((best.depth * depthPct) / best.ask / 100) * 100;
+    const maxByEquity = Math.floor((equity * sizePct) / best.ask / 100) * 100;
+    const qty = Math.max(minQty, Math.min(maxByDepth, maxByEquity, maxNotional / best.ask));
     const normalized = Math.floor(qty / 100) * 100;
-    if (normalized < 100) return;
+    if (normalized < minQty) return;
     this.lastAutoAt.set(accountId, Date.now());
     try {
       await this.createOrder({ id: "system", name: "自动引擎 · " + def.name, role: "admin" }, {
@@ -268,6 +276,7 @@ export class Engine {
   derived(accountId: AccountId): DerivedEvent[] {
     const account = this.account(accountId);
     const global = this.settings();
+    const rules = this.rules(accountId);
     const positions = this.repo.positionsAll(accountId);
     const heldIds = new Set(positions.map(p => p.evId));
     return this.market.events
@@ -279,7 +288,15 @@ export class Engine {
         positions,
         heldIds,
         strategy: accountId,
-        quoteAgeMs: ev.quoteAgeMs
+        quoteAgeMs: ev.quoteAgeMs,
+        minConfidence: ruleEnabled(rules, "min-confidence") ? ruleValue(rules, "min-confidence", 62) : 0,
+        minDepth: ruleEnabled(rules, "min-depth") ? ruleValue(rules, "min-depth", 15_000) : 0,
+        fatEdgeBps: ruleEnabled(rules, "fat-edge") ? ruleValue(rules, "fat-edge", 800) : Number.POSITIVE_INFINITY,
+        settleFreezeDays: ruleEnabled(rules, "settle-freeze") ? ruleValue(rules, "settle-freeze", 2) : 0,
+        dailyLossPct: ruleEnabled(rules, "daily-loss") ? dailyLossPct(this.repo, accountId, this.currentEquity(accountId)) : 0,
+        dailyLossLimit: ruleValue(rules, "daily-loss", 1.5),
+        venueLatencyMs: this.market.hlStatus.latencyMs ?? 0,
+        venueLatencyLimit: ruleEnabled(rules, "latency") ? ruleValue(rules, "latency", 800) : Number.POSITIVE_INFINITY
       }));
   }
 
@@ -412,17 +429,23 @@ export class Engine {
       throw new EngineError("pm_offline", "Polymarket 实时目录未连接，暂停新开仓；已有头寸仍可平仓", 409);
     }
     const source = input.source ?? "manual";
+    const rules = this.rules(input.accountId);
     const d = this.derived(input.accountId).find(r => r.id === input.eventId);
     if (!d) throw new EngineError("event_not_found", "事件不存在、已下架，或不属于该账户的策略范围", 404);
     const qty = Math.floor(Number(input.qty));
-    if (!Number.isFinite(qty) || qty < 100) throw new EngineError("qty_invalid", "合约腿数量至少 100 股");
-    const maxQty = Math.floor(d.depth / d.ask / 100) * 100;
-    if (qty > maxQty) throw new EngineError("qty_exceeds_depth", `盘口最多可成交 ${maxQty.toLocaleString("en-US")} 股`);
+    const minQty = ruleValue(rules, "min-qty", 100);
+    if (!Number.isFinite(qty) || qty < minQty) throw new EngineError("qty_invalid", `合约腿数量至少 ${minQty.toLocaleString("en-US")} 股`);
+    const manualDepthPct = ruleValue(rules, "manual-depth-pct", 65);
+    const maxQty = Math.floor((d.depth * manualDepthPct / 100) / d.ask / 100) * 100;
+    if (qty > maxQty) throw new EngineError("qty_exceeds_depth", `按盘口 ${manualDepthPct}% 上限最多可成交 ${maxQty.toLocaleString("en-US")} 股`);
 
     const book = this.book(input.accountId);
     const limits = this.limitsWithUsage(input.accountId);
-    const rules = this.rules(input.accountId);
     const equityNow = this.currentEquity(input.accountId);
+    const orderPct = ruleValue(rules, "max-order-pct", 25);
+    if (qty * d.ask > equityNow * orderPct / 100) {
+      throw new EngineError("size_too_large", `单笔不得超过账户净值的 ${orderPct}%（当前 ${usd(qty * d.ask, 0)} / 上限 ${usd(equityNow * orderPct / 100, 0)}）`);
+    }
     const check = checkOrder({
       event: d, qty, book, limits, rules, equity: equityNow,
       kill: account.kill, auto: account.auto, source,
@@ -432,6 +455,10 @@ export class Engine {
     });
     if (!check.ok) {
       throw new EngineError("risk_rejected", check.failures.map(f => f.message).join(" "), 409);
+    }
+    const latencyRule = rules.find(r => r.id === "latency");
+    if (latencyRule?.on && this.market.hlStatus.latencyMs != null && this.market.hlStatus.latencyMs > ruleValue(rules, "latency", 1500)) {
+      throw new EngineError("venue_latency", `Hyperliquid 心跳 ${this.market.hlStatus.latencyMs}ms，超过 ${ruleValue(rules, "latency", 1500)}ms，暂停开仓`);
     }
     const mode = this.tradingMode();
     const liveReason = this.liveBlockedReason();
@@ -827,14 +854,21 @@ export class Engine {
     }
     const d = this.derived(accountId).find(r => r.id === input.eventId);
     if (!d) throw new EngineError("event_not_found", "事件不存在或不属于该账户策略", 404);
+    const rules = this.rules(accountId);
     if (!(input.sizeUsd >= 1000)) throw new EngineError("size_too_small", "最低 1,000 USDC");
     const qty = Math.floor(input.sizeUsd / d.ask / 100) * 100;
-    if (qty < 100) throw new EngineError("size_too_small", "规模不足以买入最小股数");
+    const minQty = ruleValue(rules, "min-qty", 100);
+    if (qty < minQty) throw new EngineError("size_too_small", `规模不足以买入最小 ${minQty.toLocaleString("en-US")} 股`);
     const equityNow = this.currentEquity(accountId);
-    if (qty * d.ask > equityNow * 0.25) throw new EngineError("size_too_large", "单笔不得超过账户净值的 25%");
+    const orderPct = ruleValue(rules, "max-order-pct", 25);
+    if (qty * d.ask > equityNow * orderPct / 100) throw new EngineError("size_too_large", `单笔不得超过账户净值的 ${orderPct}%`);
+    const latencyRule = rules.find(r => r.id === "latency");
+    if (latencyRule?.on && this.market.hlStatus.latencyMs != null && this.market.hlStatus.latencyMs > ruleValue(rules, "latency", 800)) {
+      throw new EngineError("venue_latency", `Hyperliquid 心跳 ${this.market.hlStatus.latencyMs}ms，超过 ${ruleValue(rules, "latency", 800)}ms，暂停建仓`);
+    }
     const check = checkOrder({
       event: d, qty, book: this.book(accountId), limits: this.limitsWithUsage(accountId),
-      rules: this.rules(accountId), equity: equityNow, kill: account.kill, auto: account.auto,
+      rules, equity: equityNow, kill: account.kill, auto: account.auto,
       source: "manual", dailyLossPct: dailyLossPct(this.repo, accountId, equityNow), strategy: accountId
     });
     if (!check.ok) throw new EngineError("risk_rejected", check.failures.map(f => f.message).join(" "), 409);
@@ -1033,11 +1067,36 @@ export class Engine {
   toggleRule(user: Actor, accountId: AccountId, id: string, on: boolean): Rule {
     const rule = this.rules(accountId).find(r => r.id === id);
     if (!rule) throw new EngineError("rule_not_found", "规则不存在", 404);
-    this.repo.ruleSet(accountId, id, on);
+    if (rule.hard && !on) throw new EngineError("rule_hard", `${rule.name} 是硬约束，不能关闭`, 409);
+    this.repo.ruleUpsert(accountId, { ...rule, on });
     this.log(user, accountId, on ? "启用规则" : "关闭规则", rule.name, accountDef(accountId).name,
-      on ? "规则重新参与该账户的下单前校验" : "关闭期间该账户不再被此规则拦截");
+      `${on ? "规则重新参与该账户的下单前校验" : "关闭期间该账户不再被此规则拦截"}${rule.value != null ? `；阈值 ${rule.value}${rule.unit ?? ""}` : ""}`);
     this.touch();
     return { ...rule, on };
+  }
+
+  updateRule(user: Actor, accountId: AccountId, id: string, patch: { on?: boolean; value?: number }): Rule {
+    const rule = this.rules(accountId).find(r => r.id === id);
+    if (!rule) throw new EngineError("rule_not_found", "规则不存在", 404);
+    if (rule.hard && patch.on === false) throw new EngineError("rule_hard", `${rule.name} 是硬约束，不能关闭`, 409);
+    const next = { ...rule };
+    if (patch.on !== undefined) next.on = patch.on;
+    if (patch.value !== undefined) {
+      if (!Number.isFinite(patch.value)) throw new EngineError("rule_value_invalid", "规则阈值必须是数字", 409);
+      const min = rule.min ?? 0;
+      const max = rule.max ?? Number.MAX_SAFE_INTEGER;
+      if (patch.value < min || patch.value > max) {
+        throw new EngineError("rule_value_invalid", `${rule.name} 阈值需在 ${min}–${max}${rule.unit ?? ""} 之间`, 409);
+      }
+      next.value = +patch.value.toFixed(4);
+    }
+    this.repo.ruleUpsert(accountId, next);
+    const changes: string[] = [];
+    if (patch.on !== undefined && patch.on !== rule.on) changes.push(patch.on ? "启用" : "关闭");
+    if (patch.value !== undefined && patch.value !== rule.value) changes.push(`阈值 ${rule.value ?? "—"} → ${next.value}${rule.unit ?? ""}`);
+    this.log(user, accountId, "调整规则", rule.name, accountDef(accountId).name, changes.join("；") || "无变化");
+    this.touch();
+    return next;
   }
 
   /** Admin-only: change an account's equity, enablement or execution parameters. */

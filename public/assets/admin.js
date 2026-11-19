@@ -324,9 +324,13 @@ function renderRisk() {
   $("#risk-limits").innerHTML = limitsTable(S.settings?.limits);
   const rules = S.settings?.rules || [];
   $("#rules-count").textContent = rules.filter(r => r.on).length + " / " + rules.length + " 启用";
+  const unit = r => r.unit === "days" ? "天" : r.unit === "pct" ? "%" : r.unit === "usd" ? "USDC" : r.unit === "ms" ? "ms" : r.unit === "bps" ? "bps" : r.unit === "shares" ? "股" : r.unit === "x" ? "x" : r.unit === "sec" ? "秒" : "/100";
   $("#rules-list").innerHTML = rules.map(r =>
-    '<div class="admin-rule"><div><b>' + esc(r.name) + "</b><span>" + esc(r.desc) + "</span></div>" +
-    '<button type="button" class="admin-switch" role="switch" data-rule="' + esc(r.id) + '" aria-checked="' + String(r.on) + '"></button></div>'
+    '<div class="admin-rule"><div><b>' + esc(r.name) + (r.hard ? ' <span class="admin-tag">硬约束</span>' : "") + "</b><span>" + esc(r.desc) + "</span></div>" +
+    '<div class="admin-rule-side">' +
+      (r.value != null ? '<label class="admin-rule-param"><input type="number" data-rule-value="' + esc(r.id) + '" value="' + r.value + '" min="' + (r.min ?? 0) + '" max="' + (r.max ?? 1e9) + '" step="' + (r.step ?? 1) + '"><span>' + unit(r) + "</span></label>" : "") +
+      '<button type="button" class="admin-switch" role="switch" data-rule="' + esc(r.id) + '" aria-checked="' + String(r.on) + '"' + (r.hard ? " disabled" : "") + "></button>" +
+    "</div></div>"
   ).join("");
 }
 
@@ -690,6 +694,18 @@ $("#rules-list").addEventListener("click", async e => {
     await api("PATCH", "/api/risk/rules/" + b.dataset.rule, { accountId: S.riskAccount, on });
     b.setAttribute("aria-checked", String(on));
     toast(on ? "规则已启用" : "规则已关闭", on ? "ok" : "warn");
+    await loadAll();
+  } catch (err) { toast("更新失败：" + err.message, "bad"); }
+});
+
+$("#rules-list").addEventListener("change", async e => {
+  const input = e.target.closest("[data-rule-value]");
+  if (!input) return;
+  const value = Number(input.value);
+  if (!Number.isFinite(value)) { toast("阈值必须是数字", "bad"); return; }
+  try {
+    await api("PATCH", "/api/risk/rules/" + input.dataset.ruleValue, { accountId: S.riskAccount, value });
+    toast("阈值已更新", "ok");
     await loadAll();
   } catch (err) { toast("更新失败：" + err.message, "bad"); }
 });

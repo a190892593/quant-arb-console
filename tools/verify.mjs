@@ -167,7 +167,7 @@ try {
     spark: !!document.querySelector('#hero-spark svg')
   })`);
   check("总览渲染：雷达、净值曲线、迷你曲线", counts.radar === 5 && counts.chart && counts.spark, JSON.stringify(counts));
-  check("工作区数据齐全", counts.orders >= 1 && counts.positions >= 1 && counts.limits === 5 && counts.rules === 5, JSON.stringify(counts));
+  check("工作区数据齐全", counts.orders >= 1 && counts.positions >= 1 && counts.limits === 5 && counts.rules === 16, JSON.stringify(counts));
 
   for (const route of ["scanner", "execution", "positions", "risk", "overview"]) {
     await evaluate(`location.hash = "#/${route}"`);
@@ -336,7 +336,7 @@ try {
     limits: document.querySelectorAll('#risk-limits tbody tr').length,
     rules: document.querySelectorAll('#rules-list .admin-rule').length
   })`);
-  check("后台风控按账户切换", riskAccount.selector === "converge" && riskAccount.synced === "converge" && riskAccount.limits === 5 && riskAccount.rules === 5, JSON.stringify(riskAccount));
+  check("后台风控按账户切换", riskAccount.selector === "converge" && riskAccount.synced === "converge" && riskAccount.limits === 5 && riskAccount.rules === 16, JSON.stringify(riskAccount));
   await evaluate(`document.querySelector('#admin-tabs [data-admin-tab="venues"]').click()`);
   await sleep(250);
   check("后台场所页", (await evaluate(`document.querySelectorAll('#venue-cards .admin-card').length`)) === 2);

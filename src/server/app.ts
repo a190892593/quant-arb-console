@@ -486,8 +486,10 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   app.patch("/api/risk/rules/:id", async (req) => {
     const a = requireTrader(req);
     const { id } = parse(z.object({ id: z.string().min(1).max(40) }), req.params);
-    const body = parse(z.object({ accountId: accountEnum, on: z.boolean() }), req.body);
-    const rule = engine.toggleRule(actorOf(a), body.accountId, id, body.on);
+    const body = parse(z.object({
+      accountId: accountEnum, on: z.boolean().optional(), value: z.number().optional()
+    }).refine(v => v.on !== undefined || v.value !== undefined, { message: "至少提供 on 或 value" }), req.body);
+    const rule = engine.updateRule(actorOf(a), body.accountId, id, { on: body.on, value: body.value });
     return { ok: true, rule, state: stateFor(a, body.accountId) };
   });
 

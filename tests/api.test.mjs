@@ -58,7 +58,7 @@ test("login issues a session and state exposes the full dashboard", async () => 
   assert.ok(json.state.events.length > 20);
   assert.equal(json.state.user.role, "admin");
   assert.ok(json.state.limits.length === 5);
-  assert.ok(json.state.rules.length === 5);
+  assert.ok(json.state.rules.length === 16);
   assert.ok(json.state.book.rows.length >= 1);
   assert.ok(Array.isArray(json.state.equity) && json.state.equity.length >= 1);
 });

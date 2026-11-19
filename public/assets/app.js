@@ -123,6 +123,11 @@ import { CONV as D, api, download } from "./store.js";
 
   const statusChip = d => {
     if (app.kill && (d.status === "ready" || d.status === "active")) return '<span class="chip chip-neg">熔断中</span>';
+    if (!paperEnabled() && d.status === "ready") return '<span class="chip chip-mute">模拟暂停</span>';
+    if (d.status === "watch" && d.statusText === "结算冻结") return '<span class="chip chip-warn">结算冻结</span>';
+    if (d.status === "watch" && d.statusText === "临近结算") return '<span class="chip chip-warn">临近结算</span>';
+    if (d.status === "watch" && d.statusText === "场所延迟") return '<span class="chip chip-warn">场所延迟</span>';
+    if (d.status === "watch" && d.statusText === "日亏损降档") return '<span class="chip chip-neg">日亏损</span>';
     if (!app.auto && d.status === "ready") return '<span class="chip chip-mute">待执行</span>';
     const map = {
       ready: '<span class="chip chip-accent">可执行</span>',
@@ -134,6 +139,17 @@ import { CONV as D, api, download } from "./store.js";
   };
 
   const computed = () => D.events.map(e => D.derive(e));
+
+  const ruleById = id => (app.rules || []).find(r => r.id === id);
+  const ruleOn = id => ruleById(id)?.on === true;
+  const ruleVal = (id, fallback) => {
+    const r = ruleById(id);
+    return r && Number.isFinite(r.value) ? r.value : fallback;
+  };
+  const ruleUnit = id => {
+    const u = ruleById(id)?.unit;
+    return u === "days" ? "天" : u === "pct" ? "%" : u === "usd" ? "USDC" : u === "ms" ? "ms" : u === "bps" ? "bps" : u === "shares" ? "股" : u === "x" ? "x" : u === "sec" ? "秒" : u === "score" ? "/100" : "";
+  };
 
   function book() { return D.book(); }
 
@@ -344,12 +360,17 @@ import { CONV as D, api, download } from "./store.js";
     app.sel = id;
     const prevFocus = document.activeElement;
 
-    const qty = Math.max(100, Math.round(d.depth * 0.65 / d.ask / 100) * 100);
+    const manualDepthPct = ruleVal("manual-depth-pct", 65);
+    const minQty = ruleVal("min-qty", 100);
+    const qty = Math.max(minQty, Math.round(d.depth * manualDepthPct / 100 / d.ask / 100) * 100);
     const planProfit = qty * d.net / 100;
-    // 净边为负时不放行：能点开详情不等于应该下单。
-    const settleFreeze = app.rules.some(r => r.id === "settle-freeze" && r.on);
-    const settleBlocked = settleFreeze && d.days < 2;
-    const canExecute = !app.kill && d.net > 0 && !settleBlocked;
+    // Every hard blocker is shown here with its live threshold; nothing is hidden behind a fixed constant.
+    const settleDays = ruleVal("settle-freeze", 2);
+    const settleBlocked = ruleOn("settle-freeze") && d.days < settleDays;
+    const maxDelta = ruleOn("max-delta") ? ruleVal("max-delta", 25) : Infinity;
+    const deltaBlocked = Math.abs(d.delta) > maxDelta;
+    const statusBlocked = d.status === "watch";
+    const canExecute = !app.kill && paperEnabled() && d.net > 0 && !statusBlocked && !settleBlocked && !deltaBlocked;
     const costs = [
       ["PM 点差", d.spreadBps],
       ["HL 手续费", d.feeBps],
@@ -428,7 +449,7 @@ import { CONV as D, api, download } from "./store.js";
         "</section>" +
 
         '<section class="dsection">' +
-          '<div class="dsection-h"><span class="eyebrow">两腿执行计划</span><small>默认 ' + Math.round(0.65 * 100) + "% 盘口深度</small></div>" +
+          '<div class="dsection-h"><span class="eyebrow">两腿执行计划</span><small>默认 ' + manualDepthPct + "% 盘口深度</small></div>" +
           '<div class="plan">' +
             '<div class="plan-leg">' +
               '<div class="plan-src"><b>POLYMARKET</b><span>合约腿</span></div>' +
@@ -448,8 +469,15 @@ import { CONV as D, api, download } from "./store.js";
           '<div class="dsection-h"><span class="eyebrow">结算与模型风险</span><small>模型 lognormal-iv v3.2</small></div>' +
           '<div class="notes">' +
             note("来源", "结算价取自 " + esc(d.src) + "，UMA 乐观预言机有 2 小时争议窗口；争议期间头寸无法提前退出。") +
-            note("模型", "公允概率由 HL 永续与期权曲面反推的数字期权价格，置信度 <b>" + d.conf + "/100</b>；低于 62 不自动执行。") +
-            note("流动性", "盘口资金 <b>" + usd(d.depth, 0) + "</b>，超过该规模的订单预计滑点上升 3–8bps。") +
+            note("模型", "公允概率由 HL 永续与期权曲面反推的数字期权价格，置信度 <b>" + d.conf + "/100</b>；低于 " + ruleVal("min-confidence", 62) + " 不自动执行。") +
+            note("流动性", "盘口资金 <b>" + usd(d.depth, 0) + "</b>，人工单默认使用 " + manualDepthPct + "% 深度，超过该规模的订单预计滑点上升 3–8bps。") +
+            note("规则检查", settleBlocked
+              ? "结算冻结：距结算 <b>" + d.days.toFixed(1) + " 天</b>，当前阈值 <b>" + settleDays + " 天</b>；到「风控 → 规则与阈值」可调整。"
+              : deltaBlocked
+                ? "真实 Delta <b>" + Math.abs(d.delta).toFixed(1) + "x</b> 超过单事件上限 <b>" + maxDelta + "x</b>；到「风控 → 规则与阈值」可调整。"
+                : statusBlocked
+                  ? "当前信号状态「<b>" + esc(d.statusText) + "</b>」，规则不允许执行；阈值与开关都在「风控 → 规则与阈值」。"
+                  : "通过当前账户的净边、结算冻结、Delta、日亏、盘口深度、场所延迟与模拟交易开关；所有阈值均可在「风控 → 规则与阈值」查看和修改。") +
           "</div>" +
         "</section>" +
 
@@ -457,9 +485,10 @@ import { CONV as D, api, download } from "./store.js";
       '<div class="drawer-f">' +
         '<div class="df-sum"><span>预计净边捕获 · ' + qty.toLocaleString("en-US") + " 股</span><b" +
           (planProfit < 0 ? ' class="neg"' : "") + ">" + signedUsd(planProfit, 0) + "</b></div>" +
+        (settleBlocked || deltaBlocked || statusBlocked ? '<button class="btn btn-ghost btn-sm" id="drawer-rule-btn">调整规则</button>' : "") +
         '<button class="btn btn-ghost btn-sm" id="simulate-btn">试算</button>' +
         '<button class="btn btn-primary" id="execute-btn"' + (canExecute ? "" : " disabled") + ">" +
-          (app.kill ? "熔断中" : d.net <= 0 ? "净边为负" : settleBlocked ? "结算冻结" : "执行套利") + "</button>" +
+          (app.kill ? "熔断中" : !paperEnabled() ? "模拟暂停" : d.net <= 0 ? "净边为负" : settleBlocked ? "结算冻结 · <" + settleDays + "天" : deltaBlocked ? "Delta 超限" : statusBlocked ? d.statusText : "执行套利") + "</button>" +
       "</div>";
 
     $("#drawer-root").hidden = false;
@@ -476,9 +505,13 @@ import { CONV as D, api, download } from "./store.js";
     $("#execute-btn").addEventListener("click", () => {
       if (!guard()) return;
       if (d.net <= 0) { toast("净边为负", "扣除两腿成本后没有正收益，这里不会替你开这个仓。", "neg"); return; }
-      if (settleBlocked) { toast("结算冻结", "该事件 48 小时内结算，规则只允许减仓，不允许新开。", "warn"); return; }
+      if (!paperEnabled()) { toast("模拟交易已暂停", "打开顶部「模拟交易」后再下单。", "warn"); return; }
+      if (settleBlocked) { toast("结算冻结", "该事件距结算 " + d.days.toFixed(1) + " 天，低于当前规则阈值 " + settleDays + " 天，只允许减仓。到「风控」可调整阈值。", "warn"); return; }
+      if (deltaBlocked) { toast("Delta 超限", "真实 Delta " + Math.abs(d.delta).toFixed(1) + "x 超过当前上限 " + maxDelta + "x。到「风控」可调整阈值。", "warn"); return; }
       executeModal(d, qty, planProfit);
     });
+    const ruleBtn = $("#drawer-rule-btn");
+    if (ruleBtn) ruleBtn.addEventListener("click", () => { closeDrawer(prevFocus); go("risk"); });
   }
 
   function note(k, text) {
@@ -1621,13 +1654,47 @@ import { CONV as D, api, download } from "./store.js";
     }
   }
 
+  function ruleInput(r) {
+    if (r.value == null) return "";
+    const unit = ruleUnit(r.id);
+    return '<label class="rule-param"><input type="number" data-rule-value="' + r.id + '"' +
+      ' value="' + r.value + '" min="' + (r.min ?? 0) + '" max="' + (r.max ?? 1e9) + '" step="' + (r.step ?? 1) + '"' +
+      ' aria-label="' + esc(r.name) + ' 阈值"><span>' + unit + "</span></label>";
+  }
+
   function renderRules() {
-    $("#rule-list").innerHTML = app.rules.map(r =>
-      '<div class="rule"><div class="rule-body"><b>' + esc(r.name) + "</b><span>" + esc(r.desc) + "</span></div>" +
-      '<button class="switch switch-sm" role="switch" aria-checked="' + r.on + '" data-rule="' + r.id + '" aria-label="' + esc(r.name) + '"><span class="knob"></span></button></div>'
+    const groups = [];
+    for (const r of app.rules) {
+      const cat = r.category || "账户规则";
+      let g = groups.find(x => x.cat === cat);
+      if (!g) { g = { cat, rows: [] }; groups.push(g); }
+      g.rows.push(r);
+    }
+    $("#rule-list").innerHTML = groups.map(g =>
+      '<div class="rule-cat">' + esc(g.cat) + "</div>" +
+      g.rows.map(r =>
+        '<div class="rule" data-rule-row="' + r.id + '">' +
+          '<div class="rule-body"><b>' + esc(r.name) + (r.hard ? ' <span class="rule-hard">硬约束</span>' : "") + "</b><span>" + esc(r.desc) + "</span></div>" +
+          '<div class="rule-side">' + ruleInput(r) +
+            '<button class="switch switch-sm" role="switch" aria-checked="' + r.on + '" data-rule="' + r.id + '"' +
+              (r.hard ? " disabled" : "") + ' aria-label="' + esc(r.name) + '"><span class="knob"></span></button>' +
+          "</div>" +
+        "</div>"
+      ).join("")
     ).join("");
     const count = app.rules.filter(r => r.on).length;
-    $(".rule-list").parentElement.querySelector(".card-h-sub").textContent = count + " / " + app.rules.length + " 启用";
+    const countEl = $("#rules-count");
+    if (countEl) countEl.textContent = count + " / " + app.rules.length + " 启用";
+    if ($("#risk-sub")) {
+      const label = currentAcct() ? acctCode(app.accountId) + " " + currentAcct().name : "当前账户";
+      $("#risk-sub").textContent = label + " 的 " + app.limits.length + " 项限额、" + app.rules.length + " 条可见规则与熔断开关；所有阈值均可在此查看和修改。";
+    }
+    const foot = $("#rule-foot");
+    if (foot) {
+      const acct = currentAcct();
+      foot.innerHTML = "策略边界（只读）：" + esc(acct?.logic || "—") +
+        "。硬约束：最小股数不可关闭；熔断、PM 离线、模拟交易关闭属于全局状态，显示在顶栏与横幅，不是隐藏规则。输入框失焦即保存，开关即时生效。";
+    }
   }
 
   function renderRiskCalendar() {
@@ -2232,6 +2299,25 @@ import { CONV as D, api, download } from "./store.js";
         toast(next ? "规则已启用" : "规则已关闭", r.name + (next ? " 已重新参与下单校验。" : " 关闭期间不会拦截任何订单，请确认风险可控。"), next ? "ok" : "warn");
       })
       .catch(err => toast("规则更新失败", err.message, "neg"));
+  });
+
+  $("#rule-list").addEventListener("change", e => {
+    const input = e.target.closest("[data-rule-value]");
+    if (!input) return;
+    const r = app.rules.find(x => x.id === input.dataset.ruleValue);
+    if (!r) return;
+    const value = Number(input.value);
+    if (!Number.isFinite(value)) { input.value = String(r.value ?? ""); toast("阈值无效", "请输入数字。", "neg"); return; }
+    void api.patch(`/api/risk/rules/${encodeURIComponent(r.id)}`, { value })
+      .then(() => {
+        syncFromState();
+        renderRules(); renderRisk(); renderTable(); renderNav(); renderOverview();
+        toast("阈值已更新", r.name + " → " + value + (ruleUnit(r.id) || "") + "；仅作用于当前账户。", "ok");
+      })
+      .catch(err => {
+        input.value = String(r.value ?? "");
+        toast("阈值更新失败", err.message, "neg");
+      });
   });
 
   $("#export-btn").addEventListener("click", async () => {

@@ -4,7 +4,7 @@ import { derive } from "../domain/pricing.js";
 import type {
   AccountId, AuditEntry, CalendarItem, DerivedEvent, EquityPoint, FeedItem, Limit, Order, Position, Review, RiskEvent, Rule
 } from "../domain/types.js";
-import { DEFAULT_LIMITS, DEFAULT_RULES } from "../domain/risk.js";
+import { DEFAULT_LIMITS, defaultRulesFor } from "../domain/risk.js";
 import { ACCOUNT_DEFS, accountDef, eligibleFor, LATENCY_MAX_DAYS } from "../domain/accounts.js";
 import { accountsAll, getSettings, saveAccounts, saveSettings } from "../settings.js";
 import { clock, dateShort, hhmm, mulberry32, simParts } from "../util.js";
@@ -53,9 +53,32 @@ export function ensureDefaults(repo: Repository): void {
   const accounts = accountsAll(repo);
   for (const acct of accounts) {
     if (repo.limitsAll(acct.id).length === 0) repo.limitsReplace(acct.id, scaledLimits(acct.equity, acct.id));
-    if (repo.rulesAll(acct.id).length === 0) repo.rulesReplace(acct.id, DEFAULT_RULES);
+    if (repo.rulesStored(acct.id).length === 0) repo.rulesReplace(acct.id, defaultRulesFor(acct.id));
     if (repo.equityAll(acct.id).length === 0) seedStartPoint(repo, acct.id, acct.equity);
   }
+}
+
+/**
+ * Add newly introduced rule parameters and fill missing values without discarding user switches.
+ * One-time migration: S2/S3 previously carried an enabled-but-bypassed settle freeze; make it explicit off.
+ */
+export function ensureRuleDefaults(repo: Repository): void {
+  const migrated = repo.metaGet("ruleDefaultsV3") === "1";
+  for (const acct of ACCOUNT_DEFS) {
+    const stored = new Map(repo.rulesStored(acct.id).map(r => [r.id, r]));
+    for (const def of defaultRulesFor(acct.id)) {
+      const row = stored.get(def.id);
+      if (!row) {
+        repo.ruleUpsert(acct.id, def);
+        continue;
+      }
+      if (row.value == null) repo.ruleUpsert(acct.id, { ...row, name: def.name, desc: def.desc, value: def.value });
+      if (!migrated && def.id === "settle-freeze" && (acct.id === "converge" || acct.id === "latency")) {
+        repo.ruleUpsert(acct.id, { ...def, on: false });
+      }
+    }
+  }
+  repo.metaSet("ruleDefaultsV3", "1");
 }
 
 /** A real account starts with one honest point: its starting capital right now. */
@@ -90,7 +113,7 @@ export function resetLiveBaseline(repo: Repository): void {
   for (const acct of accounts) {
     const start = accountDef(acct.id).defaultEquity;
     repo.limitsReplace(acct.id, scaledLimits(start, acct.id));
-    repo.rulesReplace(acct.id, DEFAULT_RULES);
+    repo.rulesReplace(acct.id, defaultRulesFor(acct.id));
     repo.equityReplace(acct.id, [{ t: now, v: start }]);
   }
   repo.metaSet("liveBaselineV1", "1");

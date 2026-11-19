@@ -2,7 +2,7 @@ import { config } from "./config.js";
 import { Repository } from "./db/repository.js";
 import { MarketService } from "./market/service.js";
 import { Engine } from "./engine/engine.js";
-import { ensureDefaults, resetLiveBaseline, seedTradingData } from "./seed/index.js";
+import { ensureDefaults, ensureRuleDefaults, resetLiveBaseline, seedTradingData } from "./seed/index.js";
 import { buildServer } from "./server/app.js";
 import { logger } from "./logger.js";
 
@@ -10,6 +10,7 @@ async function main(): Promise<void> {
   const repo = new Repository(config.dbPath);
   ensureDefaults(repo);
   if (!config.seedTestFixture && repo.metaGet("liveBaselineV2") !== "1") resetLiveBaseline(repo);
+  ensureRuleDefaults(repo);
 
   const market = new MarketService(repo);
   await market.init();

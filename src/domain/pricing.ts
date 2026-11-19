@@ -21,6 +21,14 @@ export interface DeriveContext {
   heldIds?: Set<string>;
   strategy?: AccountId;
   quoteAgeMs?: number;
+  minConfidence?: number;
+  minDepth?: number;
+  fatEdgeBps?: number;
+  settleFreezeDays?: number;
+  dailyLossPct?: number;
+  dailyLossLimit?: number;
+  venueLatencyMs?: number;
+  venueLatencyLimit?: number;
 }
 
 export function clamp(v: number, a: number, b: number): number {
@@ -67,7 +75,13 @@ export function derive(ev: EventContract, ctx: DeriveContext = {}): DerivedEvent
 
   let status: DerivedEvent["status"] = "ready";
   let statusText = "可执行";
-  if (grossBps > 800) {
+  const fatEdgeBps = ctx.fatEdgeBps ?? 800;
+  const minConfidence = ctx.minConfidence ?? 62;
+  const minDepth = ctx.minDepth ?? 15_000;
+  if (ctx.dailyLossPct != null && ctx.dailyLossLimit != null && ctx.dailyLossPct <= -ctx.dailyLossLimit) {
+    status = "watch";
+    statusText = "日亏损降档";
+  } else if (grossBps > fatEdgeBps) {
     status = "review";
     statusText = "待复核";
   } else if (strategy === "converge" && ev.fair < CONVERGE_MIN_FAIR) {
@@ -82,7 +96,13 @@ export function derive(ev: EventContract, ctx: DeriveContext = {}): DerivedEvent
   } else if (days < 1.2 && strategy === "prob") {
     status = "watch";
     statusText = "临近结算";
-  } else if (net < minEdge || ev.conf < 62 || ev.depth < 15_000) {
+  } else if (ctx.settleFreezeDays && ctx.settleFreezeDays > 0 && days < ctx.settleFreezeDays) {
+    status = "watch";
+    statusText = "结算冻结";
+  } else if (ctx.venueLatencyMs != null && ctx.venueLatencyLimit != null && ctx.venueLatencyMs > ctx.venueLatencyLimit) {
+    status = "watch";
+    statusText = "场所延迟";
+  } else if (net < minEdge || ev.conf < minConfidence || ev.depth < minDepth) {
     status = "watch";
     statusText = "观察";
   }

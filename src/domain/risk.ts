@@ -8,13 +8,46 @@ export const DEFAULT_LIMITS: Limit[] = [
   { id: "conc", name: "单事件集中度", desc: "最大单一事件成本占净值比例", value: 15, used: 0, kind: "pct" }
 ];
 
-export const DEFAULT_RULES: Rule[] = [
-  { id: "daily-loss", name: "日亏损降档", desc: "当日回撤 ≥ 1.5% 时停止开新仓，仅允许平仓与补对冲", on: true },
-  { id: "latency", name: "报价延迟熔断", desc: "任一场所心跳 > 800ms 立即暂停开仓，保留已有对冲", on: true },
-  { id: "settle-freeze", name: "结算前冻结加仓", desc: "48 小时内结算的事件只减不加，避免结算滑点", on: true },
-  { id: "fat-edge", name: "巨边人工复核", desc: "净边 > 800bps 不自动执行，先排除陈旧报价", on: true },
-  { id: "gap-fill", name: "对冲缺口自动补足", desc: "缺口 > $2,500 时按对手价补单，最多追 3 次", on: true }
+export const RULE_DEFS: Rule[] = [
+  { id: "daily-loss", name: "日亏损降档", desc: "当日回撤达到阈值时停止开新仓，仅允许平仓与补对冲", on: true, value: 1.5, unit: "pct", min: 0.2, max: 20, step: 0.1, category: "账户护栏" },
+  { id: "latency", name: "报价延迟熔断", desc: "任一场所心跳超过阈值立即暂停开仓，保留已有对冲", on: true, value: 1500, unit: "ms", min: 100, max: 10_000, step: 50, category: "账户护栏" },
+  { id: "settle-freeze", name: "结算前冻结加仓", desc: "距结算小于阈值的事件只减不加；S2/S3 默认关闭，可在本账户打开", on: true, value: 2, unit: "days", min: 0, max: 14, step: 0.5, category: "账户护栏" },
+  { id: "fat-edge", name: "巨边人工复核", desc: "毛边超过阈值时不自动执行，需人工确认以排除陈旧报价", on: true, value: 800, unit: "bps", min: 100, max: 10_000, step: 50, category: "账户护栏" },
+  { id: "gap-fill", name: "对冲缺口自动补足", desc: "对冲缺口超过 max(本阈值, 目标对冲 × 比例阈值) 时自动补单", on: true, value: 500, unit: "usd", min: 0, max: 100_000, step: 100, category: "对冲规则" },
+  { id: "gap-fill-pct", name: "对冲缺口比例阈值", desc: "目标对冲名义的比例阈值，与固定金额阈值取较大值", on: true, value: 3, unit: "pct", min: 0, max: 50, step: 0.5, category: "对冲规则" },
+  { id: "max-delta", name: "单事件最大真实 Delta", desc: "事件真实 Delta 超过该倍数额度时拒绝建仓", on: true, value: 25, unit: "x", min: 1, max: 50, step: 1, category: "执行阈值" },
+  { id: "min-qty", name: "最小合约腿数量", desc: "低于该股数的订单直接拒绝；这是硬约束", on: true, value: 100, unit: "shares", min: 100, max: 100_000, step: 100, category: "执行阈值", hard: true },
+  { id: "max-order-pct", name: "单笔最大净值占比", desc: "单笔订单合约成本不得超过账户当前净值的比例", on: true, value: 25, unit: "pct", min: 1, max: 100, step: 1, category: "执行阈值" },
+  { id: "manual-depth-pct", name: "人工下单盘口占比", desc: "人工执行默认使用的 Polymarket 盘口深度比例", on: true, value: 65, unit: "pct", min: 5, max: 100, step: 5, category: "执行阈值" },
+  { id: "auto-size-pct", name: "自动执行单笔净值占比", desc: "自动引擎单笔目标成本占账户净值的比例", on: true, value: 6, unit: "pct", min: 0.5, max: 25, step: 0.5, category: "自动执行" },
+  { id: "auto-max-notional", name: "自动单笔名义上限", desc: "自动引擎单笔合约成本上限，避免高净值时单笔过大", on: true, value: 40_000, unit: "usd", min: 100, max: 10_000_000, step: 100, category: "自动执行" },
+  { id: "depth-utilization-pct", name: "盘口深度使用上限", desc: "自动订单最多使用 Polymarket 盘口深度的比例", on: true, value: 40, unit: "pct", min: 5, max: 100, step: 5, category: "自动执行" },
+  { id: "auto-cooldown-sec", name: "自动执行冷却", desc: "同一账户两笔自动开仓之间的最小间隔", on: true, value: 60, unit: "sec", min: 10, max: 3600, step: 10, category: "自动执行" },
+  { id: "min-confidence", name: "最低置信度", desc: "信号置信度低于该分数时只观察，不进入可执行队列", on: true, value: 62, unit: "score", min: 0, max: 100, step: 1, category: "信号过滤" },
+  { id: "min-depth", name: "最低盘口深度", desc: "Polymarket 可成交深度低于该金额时只观察", on: true, value: 15_000, unit: "usd", min: 0, max: 1_000_000, step: 1000, category: "信号过滤" }
 ];
+
+export const DEFAULT_RULES: Rule[] = RULE_DEFS.map(r => ({ ...r }));
+
+/** S2/S3 trade the final convergence window, so the settlement freeze is off by default. */
+export function defaultRulesFor(accountId: AccountId): Rule[] {
+  return RULE_DEFS.map(r => ({
+    ...r,
+    on: r.id === "settle-freeze"
+      ? accountId !== "converge" && accountId !== "latency"
+      : r.on
+  }));
+}
+
+export function ruleValue(rules: Rule[], id: string, fallback: number): number {
+  const rule = rules.find(r => r.id === id);
+  return Number.isFinite(rule?.value) ? Number(rule!.value) : fallback;
+}
+
+export function ruleEnabled(rules: Rule[], id: string): boolean {
+  return rules.find(r => r.id === id)?.on === true;
+}
+
 
 export function limitUsage(book: Book, equity: number, limits: Limit[]): Limit[] {
   return limits.map(l => {
@@ -75,10 +108,12 @@ export function checkOrder(input: OrderCheckInput): CheckResult {
   const settle7 = book.settle7 + (d.days <= 7 ? newCost : 0);
   const concPct = equity > 0 ? Math.max(book.maxCost, newCost) / equity * 100 : 100;
 
+  const minQty = Math.max(1, ruleValue(rules, "min-qty", 100));
+  const maxDelta = ruleEnabled(rules, "max-delta") ? ruleValue(rules, "max-delta", 25) : Infinity;
   if (kill) failures.push({ code: "kill_switch", message: "熔断已触发，新开仓与补对冲均已停止。" });
-  if (!(qty >= 100)) failures.push({ code: "qty_invalid", message: "合约腿数量至少 100 股。" });
-  if (Math.abs(d.delta) > 25) {
-    failures.push({ code: "delta_too_large", message: `该事件真实 Delta 为 ${d.delta.toFixed(1)}x 面值，超过 25x 上限，拒绝建仓。` });
+  if (!(qty >= minQty)) failures.push({ code: "qty_invalid", message: `合约腿数量至少 ${minQty.toLocaleString("en-US")} 股。` });
+  if (Math.abs(d.delta) > maxDelta) {
+    failures.push({ code: "delta_too_large", message: `该事件真实 Delta 为 ${d.delta.toFixed(1)}x 面值，超过 ${maxDelta}x 上限，拒绝建仓。` });
   }
   if (qty > 0 && newCost > d.depth) {
     failures.push({ code: "depth_exceeded", message: `计划 ${fmtUsd(newCost)} 超过盘口可成交 ${fmtUsd(d.depth)}。` });
@@ -87,16 +122,15 @@ export function checkOrder(input: OrderCheckInput): CheckResult {
     failures.push({ code: "negative_edge", message: "净边为负，自动执行已拒绝。" });
   }
 
-  const rule = (id: string) => rules.find(r => r.id === id)?.on === true;
-  const nearExpiryDesk = input.strategy === "converge" || input.strategy === "latency";
-  if (rule("settle-freeze") && d.days < 2 && !nearExpiryDesk) {
-    failures.push({ code: "settle_freeze", message: "结算前 48 小时冻结加仓，只允许减仓。" });
+  const rule = (id: string) => ruleEnabled(rules, id);
+  if (rule("settle-freeze") && d.days < ruleValue(rules, "settle-freeze", 2)) {
+    failures.push({ code: "settle_freeze", message: `结算前 ${ruleValue(rules, "settle-freeze", 2)} 天冻结加仓，只允许减仓。` });
   }
-  if (rule("fat-edge") && d.grossBps > 800 && source === "auto" && !ackFatEdge) {
-    failures.push({ code: "fat_edge", message: "毛边超过 800bps，需人工复核后才可执行。" });
+  if (rule("fat-edge") && d.grossBps > ruleValue(rules, "fat-edge", 800) && source === "auto" && !ackFatEdge) {
+    failures.push({ code: "fat_edge", message: `毛边超过 ${ruleValue(rules, "fat-edge", 800)}bps，需人工复核后才可执行。` });
   }
-  if (rule("daily-loss") && dailyLossPct <= -1.5) {
-    failures.push({ code: "daily_loss", message: `当日回撤 ${dailyLossPct.toFixed(2)}%，已触发日亏损降档。` });
+  if (rule("daily-loss") && dailyLossPct <= -ruleValue(rules, "daily-loss", 1.5)) {
+    failures.push({ code: "daily_loss", message: `当日回撤 ${dailyLossPct.toFixed(2)}%，已触发日亏损降档（阈值 ${ruleValue(rules, "daily-loss", 1.5)}%）。` });
   }
 
   const limit = (id: string) => limits.find(l => l.id === id);
