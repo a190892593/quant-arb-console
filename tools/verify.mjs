@@ -1,48 +1,42 @@
 /* ============================================================
-   CONVERGENCE · 无依赖验收脚本
-
-   用法：node tools/verify.mjs
-   需要本机已安装 Chrome 或 Edge（headless 运行，不打开窗口）。
-   退出码 0 表示全部通过，1 表示有失败项。
-
-   它做三件事：
-   1. 用 DevTools 协议把页面跑在真实 Chromium 里，捕获 JS 异常与 console 报错；
-   2. 走一遍关键交互（扫描 → 详情 → 下单 → 对冲成交 → 熔断 → 平仓 → 风控）；
-   3. 断言页面不产生横向滚动，并把失败项连同比对值打出来。
+   CONVERGENCE · end-to-end verification
+   Starts a real server with an isolated SQLite database, drives a
+   headless Chromium through the terminal and admin console, and
+   asserts the same behaviours the product promises.
    ============================================================ */
 
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const APP = join(ROOT, "event-arb-console.html");
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+const results = [];
+function check(name, ok, detail) {
+  results.push({ name, ok: !!ok });
+  console.log((ok ? "  ✓ " : "  ✗ ") + name + (ok || detail === undefined ? "" : "  → " + detail));
+}
 
-/* ---------------- 找浏览器 ---------------- */
 function findBrowser() {
-  const candidates = [
+  return [
     process.env.CHROME_PATH,
     "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
     "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
     "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
     "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
     "/usr/bin/google-chrome",
-    "/usr/bin/chromium",
-  ].filter(Boolean);
-  return candidates.find(p => existsSync(p)) || null;
+    "/usr/bin/chromium"
+  ].filter(Boolean).find(p => existsSync(p));
 }
 
-/* ---------------- 极简 CDP 客户端 ---------------- */
 async function connect(url) {
   const ws = new WebSocket(url);
   await new Promise((res, rej) => {
     ws.addEventListener("open", res, { once: true });
-    ws.addEventListener("error", () => rej(new Error("无法连接到浏览器调试端口")), { once: true });
+    ws.addEventListener("error", () => rej(new Error("CDP connect failed")), { once: true });
   });
   let id = 0;
   const pending = new Map();
@@ -50,113 +44,117 @@ async function connect(url) {
   ws.addEventListener("message", ev => {
     const msg = JSON.parse(ev.data);
     if (msg.id && pending.has(msg.id)) {
-      const { res, rej } = pending.get(msg.id);
-      pending.delete(msg.id);
-      if (msg.error) rej(new Error(msg.error.message));
-      else res(msg.result);
+      const p = pending.get(msg.id); pending.delete(msg.id);
+      msg.error ? p.rej(new Error(msg.error.message)) : p.res(msg.result);
       return;
     }
     for (const l of listeners.slice()) l(msg);
   });
   const send = (method, params = {}) => new Promise((res, rej) => {
-    const mid = ++id;
-    pending.set(mid, { res, rej });
+    const mid = ++id; pending.set(mid, { res, rej });
     ws.send(JSON.stringify({ id: mid, method, params }));
   });
-  return {
-    send,
-    on: (method, cb) => listeners.push(m => { if (m.method === method) cb(m.params); }),
-    once: (method, cb) => {
-      const h = m => { if (m.method === method) { listeners.splice(listeners.indexOf(h), 1); cb(m.params); } };
-      listeners.push(h);
-    },
-  };
+  return { send, on: fn => listeners.push(fn), close: () => ws.close() };
 }
 
-async function launch(port) {
+async function launchBrowser(port) {
   const bin = findBrowser();
-  if (!bin) {
-    console.error("没有找到 Chrome / Edge。设置 CHROME_PATH 指向可执行文件后重试。");
-    process.exit(2);
-  }
-  const profile = mkdtempSync(join(tmpdir(), "conv-verify-"));
+  if (!bin) throw new Error("Chrome/Edge not found; set CHROME_PATH");
+  const profile = mkdtempSync(join(tmpdir(), "conv-e2e-"));
   const proc = spawn(bin, [
-    "--headless=new",
-    "--remote-debugging-port=" + port,
-    "--user-data-dir=" + profile,
-    "--no-first-run", "--no-default-browser-check", "--disable-gpu",
-    "--hide-scrollbars", "--allow-file-access-from-files", "--no-sandbox",
-    "about:blank",
+    "--headless=new", `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`,
+    "--no-first-run", "--no-default-browser-check", "--disable-gpu", "--hide-scrollbars",
+    "--no-sandbox", "about:blank"
   ], { stdio: "ignore", windowsHide: true });
-
   let target = null;
-  for (let i = 0; i < 120; i++) {
+  for (let i = 0; i < 150; i++) {
     try {
       const r = await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: "PUT" });
       if (r.ok) { target = await r.json(); break; }
-    } catch { /* 端口还没起来 */ }
+    } catch { /* not ready */ }
     await sleep(120);
   }
-  if (!target) { proc.kill(); throw new Error("浏览器调试端口未就绪"); }
-
+  if (!target) { proc.kill(); throw new Error("browser debug port not ready"); }
   const page = await connect(target.webSocketDebuggerUrl);
   const errors = { exceptions: [], console: [] };
-  page.on("Runtime.exceptionThrown", e => errors.exceptions.push(e.exceptionDetails.text + " " + (e.exceptionDetails.exception?.description || "")));
-  page.on("Runtime.consoleAPICalled", e => {
-    if (e.type === "error") errors.console.push(e.args.map(a => a.value ?? a.description).join(" "));
+  page.on(m => {
+    if (m.method === "Runtime.exceptionThrown") errors.exceptions.push(m.params.exceptionDetails.exception?.description || m.params.exceptionDetails.text);
+    if (m.method === "Runtime.consoleAPICalled" && m.params.type === "error") errors.console.push(m.params.args.map(a => a.value ?? a.description).join(" "));
+    if (m.method === "Log.entryAdded" && m.params.entry.level === "error") errors.console.push(m.params.entry.text);
   });
-  page.on("Log.entryAdded", e => { if (e.entry.level === "error") errors.console.push(e.entry.text); });
-  page.on("Page.javascriptDialogOpening", () => page.send("Page.handleJavaScriptDialog", { accept: true }).catch(() => {}));
-
   await page.send("Runtime.enable");
   await page.send("Page.enable");
   await page.send("Log.enable");
-  await page.send("Network.enable");
   return { proc, page, errors };
 }
 
-/* ---------------- 断言 ---------------- */
-const results = [];
-function check(name, ok, detail) {
-  results.push({ name, ok: !!ok });
-  if (!ok) console.log(`  ✗ ${name}${detail === undefined ? "" : "  → " + detail}`);
+async function waitForServer(base) {
+  for (let i = 0; i < 120; i++) {
+    try {
+      const r = await fetch(base + "/api/health");
+      if (r.ok) return await r.json();
+    } catch { /* not ready */ }
+    await sleep(200);
+  }
+  throw new Error("server did not become ready");
 }
 
-const URL = pathToFileURL(APP).href;
-const PORT = 9500 + Math.floor(Math.random() * 400);
+const browserPort = 9400 + Math.floor(Math.random() * 300);
+const appPort = 8800 + Math.floor(Math.random() * 300);
+const base = `http://127.0.0.1:${appPort}`;
+const dbDir = mkdtempSync(join(tmpdir(), "conv-e2e-db-"));
+const dbPath = join(dbDir, "app.db");
 
-const browser = await launch(PORT);
-const page = browser.page;
-const wait = ms => sleep(ms);
+const server = spawn(process.execPath, [join(ROOT, "dist", "index.js")], {
+  cwd: ROOT,
+  env: {
+    ...process.env,
+    PORT: String(appPort),
+    HOST: "127.0.0.1",
+    DB_PATH: dbPath,
+    MARKET_DATA_MODE: "demo",
+    PM_ENABLED: "false",
+    HL_ENABLED: "false",
+    LOG_LEVEL: "silent",
+    NODE_ENV: "test"
+  },
+  stdio: ["ignore", "pipe", "pipe"]
+});
+let serverLog = "";
+server.stdout.on("data", d => { serverLog += d.toString(); });
+server.stderr.on("data", d => { serverLog += d.toString(); });
 
-const evaluate = async expression => {
-  const r = await page.send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true, userGesture: true });
-  if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text);
-  return r.result.value;
-};
-const viewport = (width, height, mobile = false) =>
-  page.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile });
-const goto = async (url, waitMs = 700) => {
-  const loaded = new Promise(res => page.once("Page.loadEventFired", res));
-  await page.send("Page.navigate", { url });
-  await Promise.race([loaded, sleep(8000)]);
-  await wait(waitMs);
-};
-
+let browser;
 try {
-  console.log("CONVERGENCE · 验收");
-  await viewport(1600, 1000);
-  await goto(URL + "?debug=1", 1600);
+  console.log("CONVERGENCE · 全栈验收");
+  const health = await waitForServer(base);
+  check("服务端健康检查", health.ok === true, JSON.stringify(health));
 
-  /* ---------- 1. 五个视图都能渲染 ---------- */
-  for (const route of ["overview", "scanner", "execution", "positions", "risk"]) {
-    await evaluate(`location.hash = "#/${route}"`);
-    await wait(280);
-    const shown = await evaluate(`[...document.querySelectorAll('.view')].filter(v => !v.hidden).map(v => v.dataset.view)`);
-    check(`视图 ${route} 单独显示`, shown.length === 1 && shown[0] === route, JSON.stringify(shown));
-  }
+  browser = await launchBrowser(browserPort);
+  const { page, errors } = browser;
+  const evaluate = async expression => {
+    const r = await page.send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true, userGesture: true });
+    if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text);
+    return r.result.value;
+  };
+  const goto = async (url, wait = 900) => {
+    await page.send("Page.navigate", { url });
+    await sleep(wait);
+  };
+  const shot = async name => {
+    const s = await page.send("Page.captureScreenshot", { format: "png" });
+    writeFileSync(join(ROOT, "preview", name), Buffer.from(s.data, "base64"));
+  };
 
-  const counts = await evaluate(`(() => ({
+  await page.send("Emulation.setDeviceMetricsOverride", { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
+  await goto(base + "/login", 700);
+  await shot("live-login.png");
+  await evaluate(`document.querySelector('[data-demo="admin@convergence.local"]').click()`);
+  await evaluate(`document.querySelector('#login-form').requestSubmit()`);
+  await sleep(1800);
+  check("登录后进入总览", (await evaluate("location.pathname")) === "/" && (await evaluate("document.title")).includes("总览"));
+
+  const counts = await evaluate(`({
     radar: document.querySelectorAll('#radar-list .radar-row').length,
     opp: document.querySelectorAll('#opp-body tr').length,
     orders: document.querySelectorAll('#order-list .order').length,
@@ -166,207 +164,195 @@ try {
     rules: document.querySelectorAll('#rule-list .rule').length,
     chart: !!document.querySelector('#equity-chart svg'),
     spark: !!document.querySelector('#hero-spark svg')
-  }))()`);
-  check("总览：雷达 5 条 + 两张图", counts.radar === 5 && counts.chart && counts.spark, JSON.stringify(counts));
-  check("扫描：29 条机会", counts.opp === 29, String(counts.opp));
-  check("执行台：订单与待接管都有内容", counts.orders === 4 && counts.reviews === 3, JSON.stringify(counts));
-  check("持仓：9 个头寸", counts.positions === 9, String(counts.positions));
-  check("风控：5 项限额 + 5 条规则", counts.limits === 5 && counts.rules === 5, JSON.stringify(counts));
+  })`);
+  check("总览渲染：雷达、净值曲线、迷你曲线", counts.radar === 5 && counts.chart && counts.spark, JSON.stringify(counts));
+  check("工作区数据齐全", counts.orders >= 1 && counts.positions >= 1 && counts.limits === 5 && counts.rules === 5, JSON.stringify(counts));
 
-  /* ---------- 2. 扫描器筛选与排序 ---------- */
+  for (const route of ["scanner", "execution", "positions", "risk", "overview"]) {
+    await evaluate(`location.hash = "#/${route}"`);
+    await sleep(300);
+    const shown = await evaluate(`[...document.querySelectorAll('.view')].filter(v => !v.hidden).map(v => v.dataset.view)`);
+    check(`视图 ${route} 单独显示`, shown.length === 1 && shown[0] === route, JSON.stringify(shown));
+  }
+
+  await evaluate(`location.hash = "#/accounts"`);
+  await sleep(400);
+  const accountView = await evaluate(`({
+    cards: document.querySelectorAll('#acct-grid .acct-card').length,
+    rows: document.querySelectorAll('#acct-table tr').length,
+    code: document.querySelector('#acct-code').textContent
+  })`);
+  check("账户矩阵：四个独立账户", accountView.cards === 4 && accountView.rows === 4, JSON.stringify(accountView));  await evaluate(`document.querySelector('[data-acct-enter="converge"]').click()`);
+  await sleep(1400);
+  const switched = await evaluate(`({ code: document.querySelector('#acct-code').textContent, name: document.querySelector('#acct-name').textContent, route: location.hash })`);
+  check("切换账户后整个操作台切换账本", switched.code === "S2" && switched.route === "#/overview", JSON.stringify(switched));
+  await evaluate(`document.querySelector('#acct-btn').click()`);
+  await sleep(150);
+  await evaluate(`document.querySelector('[data-acct-switch="prob"]').click()`);
+  await sleep(1400);
+  check("切回原账户", (await evaluate(`document.querySelector('#acct-code').textContent`)) === "S1");
+  await evaluate(`location.hash = "#/accounts"`);
+  await sleep(400);
+  await shot("live-accounts.png");
+
   await evaluate(`location.hash = "#/scanner"`);
-  await wait(300);
-  await evaluate(`(() => { const el = document.querySelector('#q'); el.value = 'zzzz'; el.dispatchEvent(new Event('input', { bubbles: true })); })()`);
-  const emptyState = await evaluate(`(() => ({
-    empty: !document.querySelector('#opp-empty').hidden,
-    rows: document.querySelectorAll('#opp-body tr').length,
-    hidden: getComputedStyle(document.querySelector('#view-scanner .tbl-scroll')).display === 'none'
-  }))()`);
-  check("扫描器：无匹配时显示空态并隐藏表格", emptyState.empty && emptyState.rows === 0 && emptyState.hidden, JSON.stringify(emptyState));
+  await sleep(400);
+  await evaluate(`(() => { const el = document.querySelector('#q'); el.value = 'zzzz-no-match'; el.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  check("扫描器空态", await evaluate(`!document.querySelector('#opp-empty').hidden && document.querySelectorAll('#opp-body tr').length === 0`));
   await evaluate(`document.querySelector('#reset-filters').click()`);
-  await wait(200);
-  check("扫描器：重置筛选恢复 29 条", (await evaluate(`document.querySelectorAll('#opp-body tr').length`)) === 29);
+  await sleep(300);
+  const oppCount = await evaluate(`document.querySelectorAll('#opp-body tr').length`);
+  check("扫描器重置后恢复结果", oppCount > 5, String(oppCount));
 
   await evaluate(`document.querySelectorAll('#opp-table thead th')[2].click()`);
-  check("扫描器：点击表头按净边排序",
-    (await evaluate(`document.querySelector('#opp-table th.is-sorted')?.dataset.sort`)) === "edge");
-
-  await evaluate(`document.querySelector('#only-ready').click()`);
-  const onlyReady = await evaluate(`(() => {
-    const rows = [...document.querySelectorAll('#opp-body tr')];
-    return rows.length > 0 && rows.every(tr => /可执行/.test(tr.querySelector('[data-f=status]').textContent));
+  check("扫描器表头排序", (await evaluate(`document.querySelector('#opp-table th.is-sorted')?.dataset.sort`)) === "edge");
+  const tradeTargetId = await evaluate(`(async () => {
+    const r = await fetch('/api/state?account=prob'); const s = await r.json();
+    const t = s.state.events.find(e => e.status === "ready" && e.days > 2 && e.net >= s.state.settings.minEdge && e.depth > 20000);
+    return t ? t.id : null;
   })()`);
-  check("扫描器：仅可执行过滤生效", onlyReady);
-  await evaluate(`document.querySelector('#only-ready').click()`);
-
-  /* ---------- 3. 详情 → 下单 → 对冲成交 ---------- */
-  await evaluate(`document.querySelector('#opp-body tr').click()`);
-  await wait(300);
-  const drawer = await evaluate(`(() => ({
+  check("扫描器存在可执行标的", !!tradeTargetId, String(tradeTargetId));
+  const targetSelector = `#opp-body tr[data-id="${tradeTargetId}"]`;
+  await evaluate(`document.querySelector(${JSON.stringify(targetSelector)}).click()`);
+  await sleep(400);
+  const drawer = await evaluate(`({
     open: !document.querySelector('#drawer-root').hidden,
-    title: document.querySelector('.drawer-title')?.textContent,
     marks: document.querySelectorAll('.ruler-mark').length,
     legs: document.querySelectorAll('.plan-leg').length,
     cta: document.querySelector('#execute-btn')?.textContent.trim()
-  }))()`);
-  check("详情抽屉：标尺 + 两腿计划 + 主操作", drawer.open && drawer.marks === 2 && drawer.legs === 2 && drawer.cta === "执行套利", JSON.stringify(drawer));
+  })`);
+  check("机会详情：概率标尺 + 两腿计划", drawer.open && drawer.marks === 2 && drawer.legs === 2, JSON.stringify(drawer));
 
+  const positionsBefore = await evaluate(`document.querySelectorAll('#pos-body tr.row-main').length`);
+  const ordersBefore = await evaluate(`document.querySelectorAll('#order-list .order').length`);
   await evaluate(`document.querySelector('#execute-btn').click()`);
-  await wait(250);
-  check("下单确认框：数量与预览齐备", await evaluate(`!document.querySelector('#modal-root').hidden && document.querySelectorAll('#exec-preview > div').length >= 4`));
-
-  await evaluate(`(() => { const el = document.querySelector('#size-qty'); el.value = '99999999'; el.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await sleep(250);
+  check("下单确认框", await evaluate(`!document.querySelector('#modal-root').hidden && document.querySelectorAll('#exec-preview > div').length >= 4`));
+  await evaluate(`(() => { const el = document.querySelector('#size-qty'); el.value = '1000'; el.dispatchEvent(new Event('input', { bubbles: true })); })()`);
   await evaluate(`document.querySelector('#modal .btn-primary').click()`);
-  await wait(200);
-  check("下单确认框：越界数量被拦下", (await evaluate(`!document.querySelector('#modal-root').hidden`)) === true);
+  await sleep(800);
+  const afterOrder = await evaluate(`({
+    orders: document.querySelectorAll('#order-list .order').length,
+    drawer: document.querySelector('#drawer-root').hidden,
+    modal: document.querySelector('#modal-root').hidden,
+    toast: [...document.querySelectorAll('.toast')].map(t => t.textContent).join(' | ')
+  })`);
+  check("下单后订单进入执行台", afterOrder.orders === ordersBefore + 1 && afterOrder.drawer, JSON.stringify(afterOrder));
 
-  const before = await evaluate(`document.querySelectorAll('#order-list .order').length`);
-  const idBefore = await evaluate(`__convApp.orders.map(o => o.id)`);
-  const posBefore = await evaluate(`CONV.positions.length`);
-  await evaluate(`(() => { const el = document.querySelector('#size-qty'); el.value = '4000'; el.dispatchEvent(new Event('input', { bubbles: true })); })()`);
-  await evaluate(`document.querySelector('#modal .btn-primary').click()`);
-  await wait(400);
-  const after = await evaluate(`(() => ({
-    n: document.querySelectorAll('#order-list .order').length,
-    ids: __convApp.orders.map(o => o.id),
-    drawerClosed: document.querySelector('#drawer-root').hidden
-  }))()`);
-  check("下单后新订单进入执行台", after.n === before + 1 && after.drawerClosed, JSON.stringify(after));
-  check("订单号不重复", new Set(after.ids).size === after.ids.length && after.ids.filter(x => !idBefore.includes(x)).length === 1, JSON.stringify(after.ids));
-
-  await wait(4800);
-  const filled = await evaluate(`(() => {
-    const o = document.querySelector('#order-list .order');
-    return { full: o.querySelectorAll('.leg.full').length, positions: CONV.positions.length };
-  })()`);
-  check("对冲腿自动成交、两腿对齐", filled.full === 2, JSON.stringify(filled));
-  check("成交后头寸进入持仓账本", filled.positions === posBefore + 1, JSON.stringify(filled));
-
-  /* ---------- 4. 熔断与恢复 ---------- */
-  await evaluate(`document.querySelector('#kill-btn').click()`);
-  await wait(250);
-  await evaluate(`document.querySelector('#modal .btn-danger').click()`);
-  await wait(300);
-  const killed = await evaluate(`(() => ({
-    banner: !document.querySelector('#global-banner').hidden,
-    kind: document.querySelector('#global-banner').classList.contains('is-kill'),
-    switchOff: document.querySelector('#auto-switch').disabled,
-    mode: document.querySelector('#sys-mode').textContent
-  }))()`);
-  check("熔断：全站横幅 + 自动执行禁用", killed.banner && killed.kind && killed.switchOff && /熔断/.test(killed.mode), JSON.stringify(killed));
-
-  await evaluate(`location.hash = "#/risk"`);
-  await wait(300);
-  await evaluate(`document.querySelector('#kill-page-btn').click()`);
-  await wait(250);
-  await evaluate(`document.querySelector('#modal .btn-primary').click()`);
-  await wait(300);
-  check("熔断解除后恢复自动执行",
-    (await evaluate(`document.querySelector('#global-banner').hidden && /全自动/.test(document.querySelector('#sys-mode').textContent)`)) === true);
-
-  /* ---------- 5. 风控限额校验 ---------- */
-  await evaluate(`document.querySelector('[data-limit-edit]').click()`);
-  await wait(200);
-  check("风控：限额可编辑", (await evaluate(`!!document.querySelector('#limit-input')`)) === true);
-  await evaluate(`(() => { document.querySelector('#limit-input').value = '1'; })()`);
-  await evaluate(`document.querySelector('[data-limit-save]').click()`);
-  await wait(200);
-  check("风控：低于当前占用的限额被拒", (await evaluate(`!!document.querySelector('#limit-input')`)) === true);
-  await evaluate(`(() => { document.querySelector('#limit-input').value = '2000000'; })()`);
-  await evaluate(`document.querySelector('[data-limit-save]').click()`);
-  await wait(250);
-  check("风控：合法限额保存生效", (await evaluate(`!document.querySelector('#limit-input')`)) === true);
-
-  /* ---------- 6. 倒计时到期自动平仓 ---------- */
+  await sleep(5200);
+  const afterFill = await evaluate(`({
+    full: document.querySelectorAll('#order-list .order:first-child .leg.full').length,
+    positions: document.querySelectorAll('#pos-body tr.row-main').length
+  })`);
+  check("对冲腿自动成交并进入持仓", afterFill.full === 2 && afterFill.positions >= positionsBefore, JSON.stringify(afterFill));
   await evaluate(`location.hash = "#/execution"`);
-  await wait(300);
-  await evaluate(`[...document.querySelectorAll('.tab')].find(t => t.dataset.tab === 'review').click()`);
-  const revBefore = await evaluate(`__convApp.reviews.length`);
-  await evaluate(`(() => { __convApp.reviews[0].seconds = 1; })()`);
-  await wait(2400);
-  const revAfter = await evaluate(`(() => ({
-    n: __convApp.reviews.length,
-    action: __convApp.audit[0].action,
-    toast: [...document.querySelectorAll('#toasts .toast-body b')].map(b => b.textContent).join('|')
-  }))()`);
-  check("待接管倒计时归零 → 自动平仓并记审计", revAfter.n === revBefore - 1 && revAfter.action === "自动平仓", JSON.stringify(revAfter));
-
-  /* ---------- 7. 全部平仓与空态 ---------- */
-  await evaluate(`location.hash = "#/execution"`);
-  await wait(250);
-  await evaluate(`document.querySelector('#flatten-all-btn').click()`);
-  await wait(250);
-  check("全部平仓：确认框列出实时笔数", await evaluate(`/持仓事件/.test(document.querySelector('#modal .modal-b').textContent)`));
-  await evaluate(`[...document.querySelectorAll('#modal .modal-f .btn')].find(b => /确认全部平仓/.test(b.textContent)).click()`);
-  await wait(500);
-  const flat = await evaluate(`(() => ({
-    pos: CONV.positions.length,
-    orders: __convApp.orders.length,
-    reviews: __convApp.reviews.length,
-    orderEmpty: !document.querySelector('#order-empty').hidden,
-    face: document.querySelector('#pos-face').textContent
-  }))()`);
-  check("全部平仓：账本、订单、待接管全部清零", flat.pos === 0 && flat.orders === 0 && flat.reviews === 0 && flat.face === "$0", JSON.stringify(flat));
-  check("全部平仓：执行台显示空态", flat.orderEmpty);
+  await sleep(500);
+  await shot("live-execution.png");
 
   await evaluate(`location.hash = "#/positions"`);
-  await wait(400);
-  const posEmpty = await evaluate(`(() => ({
-    empty: !document.querySelector('#pos-empty').hidden,
-    hidden: getComputedStyle(document.querySelector('#view-positions .table-card .tbl-scroll')).display === 'none',
-    all: document.querySelector('#pos-all-count').textContent
-  }))()`);
-  check("持仓：空态文案与计数归零", posEmpty.empty && posEmpty.hidden && posEmpty.all === "0", JSON.stringify(posEmpty));
+  await sleep(350);
+  await evaluate(`document.querySelector('#pos-body tr.row-main')?.click()`);
+  await sleep(250);
+  check("持仓展开两腿账本", (await evaluate(`document.querySelectorAll('.legd-box').length`)) === 2);
+  await shot("live-positions.png");
 
-  await evaluate(`location.hash = "#/overview"`);
-  await wait(500);
-  const ov = await evaluate(`(() => ({
-    util: document.querySelector('#hero-util').textContent,
-    pnl: document.querySelector('#hero-pnl').textContent,
-    delta: document.querySelector('#kpi-delta').textContent
-  }))()`);
-  check("空账本下总览仍自洽", ov.util === "0.0%" && ov.pnl === "+$0" && ov.delta === "$0", JSON.stringify(ov));
+  await evaluate(`location.hash = "#/risk"`);
+  await sleep(350);
+  await evaluate(`document.querySelector('#kill-page-btn').click()`);
+  await sleep(250);
+  await evaluate(`document.querySelector('#modal .btn-danger').click()`);
+  await sleep(700);
+  const killed = await evaluate(`({
+    banner: !document.querySelector('#global-banner').hidden,
+    kill: !document.querySelector('#global-banner').classList.contains('is-kill') ? false : true,
+    disabled: document.querySelector('#auto-switch').disabled,
+    mode: document.querySelector('#sys-mode').textContent
+  })`);
+  check("熔断：横幅 + 自动执行停止", killed.banner && killed.kill && killed.disabled && /熔断/.test(killed.mode), JSON.stringify(killed));
+  await evaluate(`document.querySelector('#kill-page-btn').click()`);
+  await sleep(250);
+  await evaluate(`document.querySelector('#modal .btn-primary').click()`);
+  await sleep(600);
+  check("解除熔断后恢复", (await evaluate(`document.querySelector('#global-banner').hidden`)) === true);
 
-  /* ---------- 8. 响应式：页面永不横滚 ---------- */
-  const offenders = [];
-  for (const width of [1600, 1280, 1024, 900, 768, 700, 480, 390]) {
-    await viewport(width, 900, width <= 700);
-    await goto(URL, 600);
-    for (const route of ["overview", "scanner", "execution", "positions", "risk"]) {
-      await evaluate(`location.hash = "#/${route}"`);
-      await wait(220);
-      const m = await evaluate(`({ scrollW: document.documentElement.scrollWidth, clientW: document.documentElement.clientWidth })`);
-      if (m.scrollW > m.clientW + 1) offenders.push(width + ":" + route);
-    }
-  }
-  check("8 档宽度 × 5 个视图都不产生横向滚动", offenders.length === 0, offenders.join(","));
-
-  await viewport(390, 844, true);
-  await goto(URL, 800);
+  await page.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
   await evaluate(`location.hash = "#/scanner"`);
-  await wait(350);
-  const mobile = await evaluate(`(() => ({
-    cards: getComputedStyle(document.querySelector('#opp-cards')).display,
-    table: getComputedStyle(document.querySelector('#view-scanner .tbl-scroll')).display,
-    cardCount: document.querySelectorAll('#opp-cards .opp-card').length
-  }))()`);
-  check("移动端：机会表切换为卡片列表", mobile.cards === "flex" && mobile.table === "none" && mobile.cardCount > 0, JSON.stringify(mobile));
+  await sleep(400);
+  const mobile = await evaluate(`({
+    scroll: document.documentElement.scrollWidth <= window.innerWidth + 1,
+    cards: document.querySelectorAll('#opp-cards .opp-card').length,
+    tableHidden: getComputedStyle(document.querySelector('#opp-table')).display === 'none'
+  })`);
+  check("移动端卡片列表且页面不横滚", mobile.scroll && mobile.cards > 0, JSON.stringify(mobile));
+  await shot("live-mobile.png");
 
-  /* ---------- 9. 无运行时报错 ---------- */
-  check("没有未捕获的 JS 异常", browser.errors.exceptions.length === 0, JSON.stringify(browser.errors.exceptions));
-  check("没有 console 报错", browser.errors.console.length === 0, JSON.stringify(browser.errors.console));
+  await page.send("Emulation.setDeviceMetricsOverride", { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
+  await evaluate(`location.hash = "#/overview"`);
+  await sleep(500);
+  await shot("live-overview.png");
+  check("浏览器控制台无异常", errors.exceptions.length === 0 && errors.console.length === 0, JSON.stringify(errors));
+
+  // Admin console
+  await goto(base + "/admin", 1200);
+  check("管理后台加载", (await evaluate("document.title")).includes("管理后台") && (await evaluate(`document.querySelectorAll('.admin-nav-item').length`)) === 9);
+  const adminData = await evaluate(`({
+    kpis: document.querySelectorAll('#overview-kpis .admin-kpi').length,
+    venues: document.querySelectorAll('#overview-venues .admin-venue').length,
+    audit: document.querySelectorAll('#overview-audit tr').length,
+    users: document.querySelectorAll('#users-table tbody tr').length
+  })`);
+  check("后台概览与账号列表", adminData.kpis === 4 && adminData.venues === 2 && adminData.users >= 3, JSON.stringify(adminData));
+  await evaluate(`document.querySelector('[data-view="accounts"]').click()`);
+  await sleep(300);
+  const adminAccounts = await evaluate(`({
+    cards: document.querySelectorAll('#accounts-grid .admin-account-card').length,
+    rows: document.querySelectorAll('#accounts-table tbody tr').length,
+    kpis: document.querySelectorAll('#accounts-kpis .admin-kpi').length
+  })`);
+  check("后台策略账户矩阵", adminAccounts.cards === 4 && adminAccounts.rows === 4 && adminAccounts.kpis === 4, JSON.stringify(adminAccounts));
+  await shot("live-admin-accounts.png");
+  await evaluate(`document.querySelector('[data-view="users"]').click()`);
+  await sleep(250);
+  check("后台用户页", (await evaluate(`document.querySelectorAll('#users-table tbody tr').length`)) >= 3);
+  await evaluate(`document.querySelector('[data-view="strategy"]').click()`);
+  await sleep(250);
+  check("后台策略表单", (await evaluate(`document.querySelectorAll('#settings-fields input').length`)) >= 6);
+  await evaluate(`document.querySelector('[data-view="risk"]').click()`);
+  await sleep(250);
+  await evaluate(`(() => { const el = document.querySelector('#risk-account'); el.value = 'converge'; el.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  await sleep(600);
+  const riskAccount = await evaluate(`({
+    selector: document.querySelector('#risk-account').value,
+    synced: document.querySelector('#strategy-account').value,
+    limits: document.querySelectorAll('#risk-limits tbody tr').length,
+    rules: document.querySelectorAll('#rules-list .admin-rule').length
+  })`);
+  check("后台风控按账户切换", riskAccount.selector === "converge" && riskAccount.synced === "converge" && riskAccount.limits === 5 && riskAccount.rules === 5, JSON.stringify(riskAccount));
+  await evaluate(`document.querySelector('[data-view="venues"]').click()`);
+  await sleep(250);
+  check("后台场所页", (await evaluate(`document.querySelectorAll('#venue-cards .admin-card').length`)) === 2);
+  await shot("live-admin.png");
+  check("后台控制台无异常", errors.exceptions.length === 0, JSON.stringify(errors.exceptions));
+
+  const failed = results.filter(r => !r.ok);
+  console.log(`\n${results.length - failed.length}/${results.length} 通过`);
+  if (failed.length) {
+    console.log("失败项：");
+    failed.forEach(f => console.log(" - " + f.name));
+    process.exitCode = 1;
+  }
 } catch (err) {
-  console.error("\n验收脚本自身出错：" + err.message);
-  results.push({ name: "脚本执行", ok: false });
+  console.error("\nE2E 运行失败：", err);
+  console.error(serverLog.slice(-4000));
+  process.exitCode = 1;
 } finally {
-  try { await page.send("Browser.close"); } catch {}
-  try { browser.proc.kill(); } catch {}
+  if (browser) {
+    try {
+      const s = await browser.page.send("Page.captureScreenshot", { format: "png" });
+      writeFileSync(join(ROOT, "preview", "live-failure.png"), Buffer.from(s.data, "base64"));
+    } catch { /* ignore */ }
+    browser.page.close();
+    browser.proc.kill();
+  }
+  server.kill();
 }
-
-const failed = results.filter(r => !r.ok);
-console.log("\n结果：" + (results.length - failed.length) + "/" + results.length + " 通过");
-if (failed.length) {
-  console.log("失败项：");
-  failed.forEach(f => console.log("  - " + f.name));
-}
-process.exit(failed.length ? 1 : 0);

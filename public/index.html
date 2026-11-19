@@ -46,44 +46,51 @@
 
     <div class="acct">
       <div class="acct-top">
-        <span class="eyebrow">自营主账户</span>
-        <span class="chip chip-live"><span class="dot ok"></span>实盘</span>
+        <span class="eyebrow" id="rail-acct-label">自营主账户</span>
+        <span class="chip chip-live" id="acct-mode"><span class="dot ok"></span>实盘</span>
       </div>
       <div class="acct-equity num" id="rail-equity">$1,284,930.22</div>
-      <div class="acct-sub"><span class="dot ok"></span>2 个场所已接入 · 运行 41 天</div>
+      <div class="acct-sub" id="acct-sub"><span class="dot ok"></span>2 个场所已接入 · 运行 41 天</div>
     </div>
 
     <nav class="nav" aria-label="主导航">
       <a class="nav-item" href="#/overview" data-route="overview" title="总览 (1)">
         <svg class="ic" aria-hidden="true"><use href="#i-grid"/></svg><span class="nav-label">总览</span><kbd>1</kbd>
       </a>
-      <a class="nav-item" href="#/scanner" data-route="scanner" title="机会扫描 (2)">
-        <svg class="ic" aria-hidden="true"><use href="#i-radar"/></svg><span class="nav-label">机会扫描</span><span class="nav-badge" id="nav-scan-count">28</span><kbd>2</kbd>
+      <a class="nav-item" href="#/accounts" data-route="accounts" title="账户 (2)">
+        <svg class="ic" aria-hidden="true"><use href="#i-layers"/></svg><span class="nav-label">账户</span><kbd>2</kbd>
       </a>
-      <a class="nav-item" href="#/execution" data-route="execution" title="执行台 (3)">
-        <svg class="ic" aria-hidden="true"><use href="#i-legs"/></svg><span class="nav-label">执行台</span><span class="nav-badge nav-badge-warn" id="nav-exec-count">3</span><kbd>3</kbd>
+      <a class="nav-item" href="#/scanner" data-route="scanner" title="机会扫描 (3)">
+        <svg class="ic" aria-hidden="true"><use href="#i-radar"/></svg><span class="nav-label">机会扫描</span><span class="nav-badge" id="nav-scan-count">28</span><kbd>3</kbd>
       </a>
-      <a class="nav-item" href="#/positions" data-route="positions" title="持仓 (4)">
-        <svg class="ic" aria-hidden="true"><use href="#i-wallet"/></svg><span class="nav-label">持仓</span><kbd>4</kbd>
+      <a class="nav-item" href="#/execution" data-route="execution" title="执行台 (4)">
+        <svg class="ic" aria-hidden="true"><use href="#i-legs"/></svg><span class="nav-label">执行台</span><span class="nav-badge nav-badge-warn" id="nav-exec-count">3</span><kbd>4</kbd>
       </a>
-      <a class="nav-item" href="#/risk" data-route="risk" title="风控 (5)">
-        <svg class="ic" aria-hidden="true"><use href="#i-shield"/></svg><span class="nav-label">风控</span><span class="dot ok nav-dot" id="nav-risk-dot"></span><kbd>5</kbd>
+      <a class="nav-item" href="#/positions" data-route="positions" title="持仓 (5)">
+        <svg class="ic" aria-hidden="true"><use href="#i-wallet"/></svg><span class="nav-label">持仓</span><kbd>5</kbd>
+      </a>
+      <a class="nav-item" href="#/risk" data-route="risk" title="风控 (6)">
+        <svg class="ic" aria-hidden="true"><use href="#i-shield"/></svg><span class="nav-label">风控</span><span class="dot ok nav-dot" id="nav-risk-dot"></span><kbd>6</kbd>
       </a>
     </nav>
 
     <div class="rail-foot">
       <div class="engine">
-        <span class="dot ok"></span>
-        <div><b>引擎在线</b><small>v2.4.1 · 持仓同步 0.8s</small></div>
+        <span class="dot ok" id="engine-dot"></span>
+        <div><b>引擎在线</b><small>v2.1 · 持仓同步 <span id="sync-latency">0.8s</span></small></div>
       </div>
       <div class="user">
-        <span class="avatar">L</span>
-        <div class="user-id"><b>林 · 自营</b><small>lin@convergence.local</small></div>
-        <button class="icon-btn" aria-label="账户设置" data-toast="账户设置仅对实盘管理员开放">
+        <span class="avatar" id="user-avatar">L</span>
+        <div class="user-id"><b id="user-name">林 · 自营</b><small id="user-email">lin@convergence.local</small></div>
+        <button class="icon-btn" id="admin-btn" aria-label="管理后台" title="管理后台" hidden>
           <svg class="ic"><use href="#i-sliders"/></svg>
         </button>
+        <button class="icon-btn" id="logout-btn" aria-label="退出登录" title="退出登录">
+          <svg class="ic"><use href="#i-power"/></svg>
+        </button>
       </div>
-      <p class="rail-note">演示环境 · 行情为模拟序列</p>
+      <a class="rail-note rail-admin-link" id="admin-link" href="/admin" hidden>进入管理后台 →</a>
+      <p class="rail-note" id="data-mode-note">正在连接行情…</p>
     </div>
   </aside>
 
@@ -105,22 +112,22 @@
           <span class="num pulse-v" id="px-hype">41.28</span>
           <span class="delta down" id="chg-hype">−0.36%</span>
         </div>
-        <div class="pulse-item pulse-optional pulse-vol">
-          <span class="pulse-k">PM 24H</span>
-          <span class="num pulse-v">$18.4M</span>
-        </div>
-        <div class="pulse-item pulse-optional pulse-vol">
-          <span class="pulse-k">HL 24H</span>
-          <span class="num pulse-v">$2.31B</span>
-        </div>
       </div>
 
       <div class="top-right">
+        <div class="acct-switch" id="acct-switch">
+          <button class="acct-btn" id="acct-btn" aria-haspopup="listbox" aria-expanded="false" aria-label="切换账户">
+            <span class="acct-code" id="acct-code">S1</span>
+            <span class="acct-btn-meta"><b id="acct-name">概率偏差</b><small class="num" id="acct-equity">$620,000</small></span>
+            <svg class="ic"><use href="#i-chev"/></svg>
+          </button>
+          <div class="acct-menu" id="acct-menu" role="listbox" aria-label="独立账户" hidden></div>
+        </div>
         <div class="venue-pills">
-          <button class="venue-pill" data-toast="Polymarket CLOB · Polygon · 心跳正常 · 14ms">
+          <button class="venue-pill" id="venue-pm" data-venue="polymarket">
             <span class="dot ok"></span><span class="vp-name">POLYMARKET</span><b class="num">14ms</b>
           </button>
-          <button class="venue-pill" data-toast="Hyperliquid 永续 · 主网 · 心跳正常 · 21ms">
+          <button class="venue-pill" id="venue-hl" data-venue="hyperliquid">
             <span class="dot ok"></span><span class="vp-name">HYPERLIQUID</span><b class="num">21ms</b>
           </button>
         </div>
@@ -149,7 +156,7 @@
           <div class="page-head-main">
             <div class="eyebrow" id="today-line">OVERVIEW · 2026-11-18</div>
             <h1>总览</h1>
-            <p class="page-sub">Polymarket 事件合约与 Hyperliquid 永续之间的概率定价差，正在被自动收敛。</p>
+            <p class="page-sub" id="overview-sub">Polymarket 事件合约与 Hyperliquid 永续之间的概率定价差，正在被自动收敛。</p>
           </div>
           <div class="page-actions">
             <button class="btn btn-ghost" id="export-btn">导出日报</button>
@@ -161,11 +168,11 @@
           <div class="card hero-card">
             <div class="hero-top">
               <div class="hero-num">
-                <div class="eyebrow">组合净值 · USDC</div>
+                <div class="eyebrow">账户净值 · USDC</div>
                 <div class="hero-value num" id="hero-equity">$1,284,930.22</div>
                 <div class="hero-delta">
-                  <span class="delta up">+$4,812.66</span>
-                  <span class="muted">今日 +0.38%</span>
+                  <span class="delta up" id="hero-today">+$0</span>
+                  <span class="muted" id="hero-today-pct">今日 +0.00%</span>
                   <span class="vsep"></span>
                   <span class="muted">30 日 <b class="pos" id="hero-30d">+1.14%</b></span>
                   <span class="vsep"></span>
@@ -176,23 +183,23 @@
             </div>
             <div class="hero-attr">
               <div class="attr">
-                <span class="eyebrow">概率差收敛</span>
-                <b class="num pos">+$3,246.12</b>
-                <span class="attr-bar"><i style="width:67%"></i></span>
-              </div>
-              <div class="attr">
-                <span class="eyebrow">结算退出</span>
-                <b class="num pos">+$2,140.00</b>
-                <span class="attr-bar"><i style="width:44%"></i></span>
+                <span class="eyebrow">合约腿损益</span>
+                <b class="num pos" id="attr-contract">+$0</b>
+                <span class="attr-bar"><i id="attr-contract-bar" style="width:0%"></i></span>
               </div>
               <div class="attr">
                 <span class="eyebrow">对冲腿损益</span>
-                <b class="num neg">−$573.46</b>
-                <span class="attr-bar"><i class="neg" style="width:12%"></i></span>
+                <b class="num neg" id="attr-hedge">−$0</b>
+                <span class="attr-bar"><i class="neg" id="attr-hedge-bar" style="width:0%"></i></span>
+              </div>
+              <div class="attr">
+                <span class="eyebrow">合计未实现</span>
+                <b class="num" id="attr-total">$0</b>
+                <span class="attr-bar"><i id="attr-total-bar" style="width:0%"></i></span>
               </div>
             </div>
             <div class="hero-foot">
-              <div class="hero-foot-item"><span class="eyebrow">已实现 · 今日</span><b class="num pos">+$4,812.66</b></div>
+              <div class="hero-foot-item"><span class="eyebrow">今日盈亏</span><b class="num" id="hero-today-pnl">+$0</b></div>
               <div class="hero-foot-item"><span class="eyebrow">未实现</span><b class="num pos" id="hero-pnl">+$20,366</b></div>
               <div class="hero-foot-item"><span class="eyebrow">资金占用</span><b class="num" id="hero-util">55.8%</b></div>
               <div class="hero-foot-item"><span class="eyebrow">未对冲敞口</span><b class="num warn" id="hero-unhedged">$14,320</b></div>
@@ -206,12 +213,12 @@
             </header>
             <ul class="sys-list">
               <li><span>执行模式</span><b class="ok" id="sys-mode">全自动 · 可接管</b></li>
-              <li><span>扫描节奏</span><b class="num">500 ms · <span id="last-scan">1.2s 前</span></b></li>
-              <li><span>报价延迟</span><b class="num">PM 14ms · HL 21ms</b></li>
-              <li><span>今日成交</span><b class="num">63 笔 · $2.84M</b></li>
-              <li><span>自动执行率</span><b class="num">87.3%</b></li>
+              <li><span>扫描节奏</span><b class="num"><span id="sys-scan">2.5s</span> · <span id="last-scan">1.2s 前</span></b></li>
+              <li><span>报价延迟</span><b class="num" id="sys-latency">PM 14ms · HL 21ms</b></li>
+              <li><span>今日成交</span><b class="num" id="sys-trades">0 笔 · $0</b></li>
+              <li><span>自动执行率</span><b class="num" id="sys-auto">—</b></li>
             </ul>
-            <div class="sys-foot">
+            <div class="sys-foot" id="sys-foot">
               <svg class="ic"><use href="#i-shield"/></svg>
               <span>风控护栏 5 项启用 · 今日 0 次熔断</span>
             </div>
@@ -257,7 +264,7 @@
             </header>
             <div class="radar-list" id="radar-list"></div>
             <footer class="card-f">
-              <span><span class="dot live"></span>扫描引擎每 500ms 重算 <span class="num" id="scan-universe">412</span> 个事件 × 3 个对冲场所</span>
+              <span><span class="dot live"></span>扫描引擎每 <span class="num" id="scan-cadence">2.5s</span> 重算 <span class="num" id="scan-universe">412</span> 个事件 · Hyperliquid 对冲</span>
               <span class="num">最后更新 <span id="radar-updated">0.6s</span> 前</span>
             </footer>
           </div>
@@ -270,12 +277,12 @@
             <div class="budget-list" id="budget-list"></div>
             <div class="budget-note">
               <svg class="ic"><use href="#i-shield"/></svg>
-              <span>距最近一次限额告警 12 天。24h 内结算敞口为最大约束项。</span>
+              <span id="budget-note-text">本账户的限额、规则与熔断独立于其他账户；24h 内结算敞口是当前最大约束项。</span>
             </div>
             <div class="budget-stats">
-              <div><span class="eyebrow">今日拦截</span><b class="num">7 次</b></div>
-              <div><span class="eyebrow">熔断</span><b class="num">0</b></div>
-              <div><span class="eyebrow">限额告警</span><b class="num">12 天前</b></div>
+              <div><span class="eyebrow">今日拦截</span><b class="num" id="ov-blocks">0 次</b></div>
+              <div><span class="eyebrow">熔断</span><b class="num" id="ov-kill">0</b></div>
+              <div><span class="eyebrow">限额项</span><b class="num" id="ov-limits">5 项</b></div>
             </div>
           </div>
         </div>
@@ -314,15 +321,56 @@
         </div>
       </section>
 
+      <!-- 账户 -->
+      <section class="view" data-view="accounts" id="view-accounts" hidden>
+        <div class="page-head">
+          <div class="page-head-main">
+            <div class="eyebrow">ACCOUNTS · 四账户独立</div>
+            <h1>账户</h1>
+            <p class="page-sub">一个策略一个账户：资金、持仓、限额、规则和熔断互不共享。切换账户会切换整个操作台。</p>
+          </div>
+          <div class="page-actions">
+            <span class="scan-pill"><span class="dot live"></span>组合净值 <b class="num" id="acc-head-total">$0</b></span>
+            <button class="btn btn-ghost" id="acct-refresh"><svg class="ic"><use href="#i-refresh"/></svg>刷新快照</button>
+          </div>
+        </div>
+
+        <div class="card kpi-strip kpi-strip-4">
+          <div class="kpi"><span class="eyebrow">组合净值</span><b class="kpi-v num" id="acc-total-equity">$0</b><span class="kpi-meta">四账户合计 · 不共享资金</span></div>
+          <div class="kpi"><span class="eyebrow">未实现盈亏</span><b class="kpi-v num" id="acc-total-pnl">$0</b><span class="kpi-meta">按账户独立计算</span></div>
+          <div class="kpi"><span class="eyebrow">已部署</span><b class="kpi-v num" id="acc-total-deployed">$0</b><span class="kpi-meta">占组合净值 <span id="acc-total-used">0%</span></span></div>
+          <div class="kpi"><span class="eyebrow">运行中账户</span><b class="kpi-v num" id="acc-active">0 / 4</b><span class="kpi-meta">熔断或停用即退出自动执行</span></div>
+        </div>
+
+        <div class="acct-grid" id="acct-grid"></div>
+
+        <div class="card table-card">
+          <header class="card-h">
+            <div class="card-h-l"><span class="eyebrow">账户对比</span><span class="card-h-sub">净值 / 部署 / 信号 / 限额</span></div>
+            <span class="card-h-sub">点击行进入账户</span>
+          </header>
+          <div class="tbl-scroll">
+            <table class="tbl">
+              <thead><tr>
+                <th>账户</th><th class="num-col">净值</th><th class="num-col">已部署</th><th class="num-col">未实现</th>
+                <th class="num-col">持仓 / 在途</th><th class="num-col">信号</th><th class="num-col">限额占用</th><th>状态</th><th></th>
+              </tr></thead>
+              <tbody id="acct-table"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
       <!-- 机会扫描 -->
       <section class="view" data-view="scanner" id="view-scanner" hidden>
         <div class="page-head">
           <div class="page-head-main">
-            <div class="eyebrow">SCANNER · 概率偏差</div>
+            <div class="eyebrow" id="scan-eyebrow">SCANNER · 概率偏差</div>
             <h1>机会扫描</h1>
             <p class="page-sub">用 Hyperliquid 波动率曲面反推数字期权价格，与 Polymarket 最优卖价比较，扣除两腿成本后排序。</p>
           </div>
           <div class="page-actions">
+            <span class="chip chip-accent" id="scan-acct-chip">S1 概率偏差</span>
             <div class="scan-pill">
               <span class="dot live"></span>
               <span>扫描 <b class="num" id="scan-seq">#48,219</b></span>
@@ -418,7 +466,7 @@
       <section class="view" data-view="execution" id="view-execution" hidden>
         <div class="page-head">
           <div class="page-head-main">
-            <div class="eyebrow">EXECUTION · 两腿执行</div>
+            <div class="eyebrow" id="exec-eyebrow">EXECUTION · 两腿执行</div>
             <h1>执行台</h1>
             <p class="page-sub">合约腿成交后 800ms 内完成永续对冲；任一腿偏离计划都会被标记，超过 5 分钟交还人工。</p>
           </div>
@@ -431,8 +479,8 @@
         <div class="card kpi-strip kpi-strip-4">
           <div class="kpi"><span class="eyebrow">进行中订单</span><b class="kpi-v num" id="ex-active">4</b><span class="kpi-meta">名义 <span id="ex-active-notional">$428,600</span></span></div>
           <div class="kpi"><span class="eyebrow">待接管</span><b class="kpi-v num warn" id="ex-review">3</b><span class="kpi-meta" id="ex-review-meta">最早 4 小时后自动平仓</span></div>
-          <div class="kpi"><span class="eyebrow">今日成交名义</span><b class="kpi-v num">$2.84M</b><span class="kpi-meta">63 笔 · 平均持有 4.2 天</span></div>
-          <div class="kpi"><span class="eyebrow">平均滑点</span><b class="kpi-v num">6.2<i class="unit">bps</i></b><span class="kpi-meta">计划 5.0 bps · PM 腿占 71%</span></div>
+          <div class="kpi"><span class="eyebrow">今日成交名义</span><b class="kpi-v num" id="ex-today">$0</b><span class="kpi-meta" id="ex-today-sub">0 笔 · 平均持有 —</span></div>
+          <div class="kpi"><span class="eyebrow">平均滑点</span><b class="kpi-v num" id="ex-slip">—<i class="unit">bps</i></b><span class="kpi-meta">计划 5.0 bps</span></div>
         </div>
 
         <div class="tabs" role="tablist" aria-label="执行台分区">
@@ -483,7 +531,7 @@
       <section class="view" data-view="positions" id="view-positions" hidden>
         <div class="page-head">
           <div class="page-head-main">
-            <div class="eyebrow">POSITIONS · 敞口</div>
+            <div class="eyebrow" id="pos-eyebrow">POSITIONS · 敞口</div>
             <h1>持仓</h1>
             <p class="page-sub">每个事件合约都配一条永续对冲腿；比例低于 90% 标黄，低于 75% 自动降仓。</p>
           </div>
@@ -496,7 +544,7 @@
         <div class="card kpi-strip kpi-strip-4">
           <div class="kpi"><span class="eyebrow">总名义敞口</span><b class="kpi-v num" id="pos-face">$1,672,880</b><span class="kpi-meta" id="pos-face-meta">9 个事件 · 4 个标的</span></div>
           <div class="kpi"><span class="eyebrow">净 Delta</span><b class="kpi-v num" id="pos-delta">$14,320</b><span class="kpi-meta">占净值 <span id="pos-delta-pct">1.1%</span> · 限额 <span id="pos-delta-limit">$250,000</span></span></div>
-          <div class="kpi"><span class="eyebrow">Hyperliquid 保证金</span><b class="kpi-v num" id="pos-margin">$37,844</b><span class="kpi-meta">维持保证金率 18.4%</span></div>
+          <div class="kpi"><span class="eyebrow">Hyperliquid 保证金</span><b class="kpi-v num" id="pos-margin">$0</b><span class="kpi-meta" id="pos-margin-meta">维持保证金率 —</span></div>
           <div class="kpi"><span class="eyebrow">未实现盈亏</span><b class="kpi-v num pos" id="pos-pnl">+$20,366</b><span class="kpi-meta" id="pos-cover-meta">已覆盖 93% 的 Delta 敞口</span></div>
         </div>
 
@@ -540,7 +588,7 @@
       <section class="view" data-view="risk" id="view-risk" hidden>
         <div class="page-head">
           <div class="page-head-main">
-            <div class="eyebrow">RISK · 分级熔断</div>
+            <div class="eyebrow" id="risk-eyebrow">RISK · 分级熔断</div>
             <h1>风控</h1>
             <p class="page-sub">限额在成交前校验、成交后复核。任何一条规则触发都会降档，只有人工确认才能恢复满仓。</p>
           </div>
@@ -560,7 +608,7 @@
           </div>
           <div class="kp-right">
             <div class="kp-meta"><span class="eyebrow">最近检查</span><b class="num" id="kp-check">18:41:52</b></div>
-            <div class="kp-meta"><span class="eyebrow">今日拦截</span><b class="num">7 次</b></div>
+            <div class="kp-meta"><span class="eyebrow">今日拦截</span><b class="num" id="kp-blocks">0 次</b></div>
             <div class="kp-meta"><span class="eyebrow">熔断次数</span><b class="num" id="kp-count">0</b></div>
           </div>
         </div>
@@ -611,7 +659,6 @@
 
 <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
 
-<script src="assets/data.js"></script>
-<script src="assets/app.js"></script>
+<script type="module" src="assets/app.js"></script>
 </body>
 </html>
