@@ -1687,7 +1687,7 @@ import { CONV as D, api, download } from "./store.js";
     if (countEl) countEl.textContent = count + " / " + app.rules.length + " 启用";
     if ($("#risk-sub")) {
       const label = currentAcct() ? acctCode(app.accountId) + " " + currentAcct().name : "当前账户";
-      $("#risk-sub").textContent = label + " 的 " + app.limits.length + " 项限额、" + app.rules.length + " 条可见规则与熔断开关；所有阈值均可在此查看和修改。";
+      $("#risk-sub").textContent = label + " 的 " + app.limits.length + " 项限额、" + app.rules.length + " 条可见规则与熔断开关；风控/执行阈值可修改，策略边界只读展示。";
     }
     const foot = $("#rule-foot");
     if (foot) {
