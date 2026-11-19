@@ -178,7 +178,8 @@ export class Engine {
     if (!config.seedTestFixture && config.marketDataMode !== "demo" && this.market.pmStatus.state !== "ok") return;
     const rules = this.rules(accountId);
     const last = this.lastAutoAt.get(accountId) ?? 0;
-    if (Date.now() - last < ruleValue(rules, "auto-cooldown-sec", 60) * 1000) return;
+    const cooldownMs = ruleEnabled(rules, "auto-cooldown-sec") ? ruleValue(rules, "auto-cooldown-sec", 60) * 1000 : 0;
+    if (Date.now() - last < cooldownMs) return;
     const positions = this.repo.positionsAll(accountId);
     const open = this.repo.ordersAll(accountId).filter(o => o.status !== "filled" && o.status !== "failed");
     // maxOpen counts distinct events with exposure (held or in flight), not raw leg rows.
@@ -193,9 +194,9 @@ export class Engine {
     if (!best) return;
     const equity = this.currentEquity(accountId);
     const minQty = ruleValue(rules, "min-qty", 100);
-    const depthPct = ruleValue(rules, "depth-utilization-pct", 40) / 100;
-    const sizePct = ruleValue(rules, "auto-size-pct", 6) / 100;
-    const maxNotional = ruleValue(rules, "auto-max-notional", 40_000);
+    const depthPct = ruleEnabled(rules, "depth-utilization-pct") ? ruleValue(rules, "depth-utilization-pct", 40) / 100 : 1;
+    const sizePct = ruleEnabled(rules, "auto-size-pct") ? ruleValue(rules, "auto-size-pct", 6) / 100 : 1;
+    const maxNotional = ruleEnabled(rules, "auto-max-notional") ? ruleValue(rules, "auto-max-notional", 40_000) : Number.POSITIVE_INFINITY;
     const maxByDepth = Math.floor((best.depth * depthPct) / best.ask / 100) * 100;
     const maxByEquity = Math.floor((equity * sizePct) / best.ask / 100) * 100;
     const qty = Math.max(minQty, Math.min(maxByDepth, maxByEquity, maxNotional / best.ask));
@@ -435,14 +436,14 @@ export class Engine {
     const qty = Math.floor(Number(input.qty));
     const minQty = ruleValue(rules, "min-qty", 100);
     if (!Number.isFinite(qty) || qty < minQty) throw new EngineError("qty_invalid", `合约腿数量至少 ${minQty.toLocaleString("en-US")} 股`);
-    const manualDepthPct = ruleValue(rules, "manual-depth-pct", 65);
+    const manualDepthPct = ruleEnabled(rules, "manual-depth-pct") ? ruleValue(rules, "manual-depth-pct", 65) : 100;
     const maxQty = Math.floor((d.depth * manualDepthPct / 100) / d.ask / 100) * 100;
     if (qty > maxQty) throw new EngineError("qty_exceeds_depth", `按盘口 ${manualDepthPct}% 上限最多可成交 ${maxQty.toLocaleString("en-US")} 股`);
 
     const book = this.book(input.accountId);
     const limits = this.limitsWithUsage(input.accountId);
     const equityNow = this.currentEquity(input.accountId);
-    const orderPct = ruleValue(rules, "max-order-pct", 25);
+    const orderPct = ruleEnabled(rules, "max-order-pct") ? ruleValue(rules, "max-order-pct", 25) : 100;
     if (qty * d.ask > equityNow * orderPct / 100) {
       throw new EngineError("size_too_large", `单笔不得超过账户净值的 ${orderPct}%（当前 ${usd(qty * d.ask, 0)} / 上限 ${usd(equityNow * orderPct / 100, 0)}）`);
     }
@@ -860,7 +861,7 @@ export class Engine {
     const minQty = ruleValue(rules, "min-qty", 100);
     if (qty < minQty) throw new EngineError("size_too_small", `规模不足以买入最小 ${minQty.toLocaleString("en-US")} 股`);
     const equityNow = this.currentEquity(accountId);
-    const orderPct = ruleValue(rules, "max-order-pct", 25);
+    const orderPct = ruleEnabled(rules, "max-order-pct") ? ruleValue(rules, "max-order-pct", 25) : 100;
     if (qty * d.ask > equityNow * orderPct / 100) throw new EngineError("size_too_large", `单笔不得超过账户净值的 ${orderPct}%`);
     const latencyRule = rules.find(r => r.id === "latency");
     if (latencyRule?.on && this.market.hlStatus.latencyMs != null && this.market.hlStatus.latencyMs > ruleValue(rules, "latency", 800)) {

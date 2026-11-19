@@ -1229,6 +1229,33 @@ svg { display: block; }
 .plan-num b { display: block; font-family: var(--font-mono); font-size: 11.5px; color: var(--txt); font-weight: 400; }
 .plan-num span { font-size: 8.5px; color: var(--txt-dim); }
 
+.scenario-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; margin-bottom: 10px; }
+.scenario-summary > div {
+  background: var(--ink-900); border: 1px solid var(--line-soft); border-radius: var(--r-inner);
+  padding: 8px 9px; min-width: 0;
+}
+.scenario-summary span { display: block; font-size: 9px; color: var(--txt-dim); }
+.scenario-summary b { display: block; margin-top: 3px; font-family: var(--font-mono); font-size: 12px; font-weight: 400; color: var(--txt-hi); }
+.scenario-summary small { display: block; margin-top: 2px; font-size: 8.5px; color: var(--txt-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scenario-table { border: 1px solid var(--line-soft); border-radius: var(--r-inner); overflow: hidden; }
+.sc-row {
+  display: grid; grid-template-columns: minmax(0, 1.25fr) repeat(3, minmax(0, .75fr));
+  gap: 7px; align-items: center; padding: 7px 9px;
+  font-family: var(--font-mono); font-size: 10px;
+}
+.sc-row + .sc-row { border-top: 1px solid oklch(0.42 0.012 255 / 0.12); }
+.sc-row.head { background: var(--ink-900); color: var(--txt-dim); font-family: var(--font-ui); font-size: 8.5px; letter-spacing: .04em; }
+.sc-row.head span:not(:first-child) { text-align: right; }
+.sc-k { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.sc-k .chip { height: 15px; padding: 0 4px; font-size: 7.5px; flex: none; }
+.sc-k b { font-family: var(--font-ui); font-size: 10px; font-weight: 500; color: var(--txt); white-space: nowrap; }
+.sc-k small { color: var(--txt-dim); font-size: 8.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sc-num { text-align: right; font-size: 10px; }
+.sc-total { text-align: right; }
+.sc-total b { display: block; font-size: 10px; font-weight: 400; }
+.sc-total small { display: block; font-size: 8px; color: var(--txt-dim); }
+.scenario-note { margin-top: 8px; font-size: 9px; line-height: 1.55; color: var(--txt-dim); }
+
 .notes { display: flex; flex-direction: column; gap: 8px; }
 .note { display: flex; gap: 8px; font-size: 10.5px; color: var(--txt-mid); line-height: 1.5; }
 .note .ic { width: 12px; height: 12px; color: var(--txt-dim); margin-top: 2px; flex: none; }

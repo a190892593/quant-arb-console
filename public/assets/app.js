@@ -360,9 +360,26 @@ import { CONV as D, api, download } from "./store.js";
     app.sel = id;
     const prevFocus = document.activeElement;
 
-    const manualDepthPct = ruleVal("manual-depth-pct", 65);
+    const manualDepthPct = ruleOn("manual-depth-pct") ? ruleVal("manual-depth-pct", 65) : 100;
+    const maxOrderPct = ruleOn("max-order-pct") ? ruleVal("max-order-pct", 25) : 100;
     const minQty = ruleVal("min-qty", 100);
-    const qty = Math.max(minQty, Math.round(d.depth * manualDepthPct / 100 / d.ask / 100) * 100);
+    const limitById = id => app.limits.find(l => l.id === id);
+    const concLimit = limitById("conc");
+    const pmLimit = limitById("pm");
+    const settleLimit = limitById("settle");
+    const hlLimit = limitById("hl");
+    const maxByDepth = Math.floor(d.depth * manualDepthPct / 100 / d.ask / 100) * 100;
+    const maxByEquity = Math.floor(D.equityNow * maxOrderPct / 100 / d.ask / 100) * 100;
+    const maxByConc = concLimit ? Math.floor(D.equityNow * concLimit.value / 100 / d.ask / 100) * 100 : Infinity;
+    const maxByPm = pmLimit ? Math.floor(Math.max(0, pmLimit.value - pmLimit.used) / d.ask / 100) * 100 : Infinity;
+    const maxBySettle = settleLimit && d.days <= 7 ? Math.floor(Math.max(0, settleLimit.value - settleLimit.used) / d.ask / 100) * 100 : Infinity;
+    const maxByHl = hlLimit && Math.abs(d.delta) > 0
+      ? Math.floor(Math.max(0, hlLimit.value - hlLimit.used) * 4.8 / Math.abs(d.delta) / 100) * 100
+      : Infinity;
+    const maxByLimits = Math.min(maxByConc, maxByPm, maxBySettle, maxByHl);
+    const executableMax = Math.min(maxByDepth, maxByEquity, maxByLimits);
+    const qty = Math.max(minQty, executableMax);
+    const sizeBlocked = executableMax < minQty;
     const planProfit = qty * d.net / 100;
     // Every hard blocker is shown here with its live threshold; nothing is hidden behind a fixed constant.
     const settleDays = ruleVal("settle-freeze", 2);
@@ -370,7 +387,7 @@ import { CONV as D, api, download } from "./store.js";
     const maxDelta = ruleOn("max-delta") ? ruleVal("max-delta", 25) : Infinity;
     const deltaBlocked = Math.abs(d.delta) > maxDelta;
     const statusBlocked = d.status === "watch";
-    const canExecute = !app.kill && paperEnabled() && d.net > 0 && !statusBlocked && !settleBlocked && !deltaBlocked;
+    const canExecute = !app.kill && paperEnabled() && d.net > 0 && !statusBlocked && !settleBlocked && !deltaBlocked && !sizeBlocked;
     const costs = [
       ["PM 点差", d.spreadBps],
       ["HL 手续费", d.feeBps],
@@ -390,6 +407,57 @@ import { CONV as D, api, download } from "./store.js";
     const zoneWidth = Math.max(0.4, Math.abs(d.fair - d.ask) * 100);
     const costShare = d.grossBps > 0 ? (costTotal / d.grossBps * 100).toFixed(1) + "%" : "—";
     const netShare = d.gross > 0 ? clamp(d.net / d.gross * 100, 0, 100) : 0;
+
+    // Scenario P&L for the suggested two-leg size. Settlement is binary; the perp is marked at the same terminal spot.
+    const model = d.model;
+    const spot0 = D.market[d.und]?.px ?? model?.spot ?? 0;
+    const strike = model?.strike ?? 0;
+    const hedgeNotional = qty * Math.abs(d.delta);
+    const hedgeShort = d.delta >= 0;
+    const scenarioRows = [];
+    if (spot0 > 0 && strike > 0) {
+      const candidates = [-10, -5, 0, 5, 10].map(pct => ({ spot: spot0 * (1 + pct / 100), pct }));
+      if (Math.abs(strike / spot0 - 1) <= 0.3) candidates.push({ spot: strike, pct: (strike / spot0 - 1) * 100, strike: true });
+      const seenSpots = new Set();
+      for (const c of candidates.sort((a, z) => a.spot - z.spot)) {
+        const key = Math.round(c.spot * 100) / 100;
+        if (seenSpots.has(key)) continue;
+        seenSpots.add(key);
+        const yes = model.direction === 1 ? c.spot >= strike : c.spot <= strike;
+        const contractPnl = qty * (yes ? 1 : 0) - qty * d.ask;
+        const hedgePnl = hedgeNotional * ((hedgeShort ? spot0 - c.spot : c.spot - spot0) / spot0);
+        const total = contractPnl + hedgePnl;
+        const nearStrike = Math.abs(c.spot / strike - 1) < 0.002;
+        const label = nearStrike ? "行权价" : Math.abs(c.pct) < 0.05 ? "持平" : (c.pct > 0 ? "+" : "") + c.pct.toFixed(0) + "%";
+        scenarioRows.push({ spot: c.spot, label, yes, contractPnl, hedgePnl, total, pct: total / Math.max(1, D.equityNow) * 100 });
+      }
+    }
+    const best = scenarioRows.reduce((a, r) => !a || r.total > a.total ? r : a, null);
+    const worst = scenarioRows.reduce((a, r) => !a || r.total < a.total ? r : a, null);
+    const expectedPnl = qty * d.net / 100;
+    const scenarioHtml = !scenarioRows.length
+      ? '<section class="dsection"><div class="dsection-h"><span class="eyebrow">两腿情景盈亏</span><small>—</small></div>' +
+        '<p class="scenario-note">缺少行权价或标的价，无法生成情景表；计划本身仍可执行。</p></section>'
+      : '<section class="dsection">' +
+          '<div class="dsection-h"><span class="eyebrow">两腿情景盈亏</span><small>' + qty.toLocaleString("en-US") + " 股 · 到期结算</small></div>" +
+          '<div class="scenario-summary">' +
+            '<div><span>模型净期望</span><b class="' + (expectedPnl >= 0 ? "pos" : "neg") + '">' + signedUsd(expectedPnl, 0) + "</b><small>公允概率 " + (d.fair * 100).toFixed(1) + "%</small></div>" +
+            '<div><span>表内最佳</span><b class="pos">' + (best ? signedUsd(best.total, 0) : "—") + "</b><small>" + (best ? best.label : "—") + "</small></div>" +
+            '<div><span>表内最差</span><b class="neg">' + (worst ? signedUsd(worst.total, 0) : "—") + "</b><small>" + (worst ? worst.label : "—") + "</small></div>" +
+          "</div>" +
+          '<div class="scenario-table"><div class="sc-row head"><span>到期情景</span><span>合约腿</span><span>对冲腿</span><span>合计</span></div>' +
+            scenarioRows.map(r =>
+              '<div class="sc-row">' +
+                '<span class="sc-k"><span class="chip ' + (r.yes ? "chip-accent" : "chip-mute") + '">' + (r.yes ? "YES" : "NO") + "</span><b>" + r.label + "</b><small>" + usd(r.spot, 0) + "</small></span>" +
+                '<span class="sc-num ' + (r.contractPnl >= 0 ? "pos" : "neg") + '">' + signedUsd(r.contractPnl, 0) + "</span>" +
+                '<span class="sc-num ' + (r.hedgePnl >= 0 ? "pos" : "neg") + '">' + signedUsd(r.hedgePnl, 0) + "</span>" +
+                '<span class="sc-total"><b class="' + (r.total >= 0 ? "pos" : "neg") + '">' + signedUsd(r.total, 0) + "</b><small>" + (r.pct >= 0 ? "+" : "") + r.pct.toFixed(2) + "%</small></span>" +
+              "</div>"
+            ).join("") +
+          "</div>" +
+          '<p class="scenario-note">按建议数量 ' + qty.toLocaleString("en-US") + " 股：合约腿到期按 0/1 结算，对冲腿按到期标的价平仓；不含资金费与平仓滑点（已计入净边成本）。建议数量已按盘口占比、单笔净值、集中度、场所/结算/HL 限额取最小值。" +
+          (model.kind === "touch" ? " 触碰型为路径依赖，表中按到期价是否越过行权价近似。" : "") + "</p>" +
+        "</section>";
 
     $("#drawer").innerHTML =
       '<div class="drawer-h">' +
@@ -449,7 +517,7 @@ import { CONV as D, api, download } from "./store.js";
         "</section>" +
 
         '<section class="dsection">' +
-          '<div class="dsection-h"><span class="eyebrow">两腿执行计划</span><small>默认 ' + manualDepthPct + "% 盘口深度</small></div>" +
+          '<div class="dsection-h"><span class="eyebrow">两腿执行计划</span><small>' + qty.toLocaleString("en-US") + " 股 · 盘口 " + manualDepthPct + "% / 净值 " + maxOrderPct + "% / 限额取最小</small></div>" +
           '<div class="plan">' +
             '<div class="plan-leg">' +
               '<div class="plan-src"><b>POLYMARKET</b><span>合约腿</span></div>' +
@@ -464,6 +532,8 @@ import { CONV as D, api, download } from "./store.js";
             "</div>" +
           "</div>" +
         "</section>" +
+
+        scenarioHtml +
 
         '<section class="dsection">' +
           '<div class="dsection-h"><span class="eyebrow">结算与模型风险</span><small>模型 lognormal-iv v3.2</small></div>' +
@@ -488,7 +558,7 @@ import { CONV as D, api, download } from "./store.js";
         (settleBlocked || deltaBlocked || statusBlocked ? '<button class="btn btn-ghost btn-sm" id="drawer-rule-btn">调整规则</button>' : "") +
         '<button class="btn btn-ghost btn-sm" id="simulate-btn">试算</button>' +
         '<button class="btn btn-primary" id="execute-btn"' + (canExecute ? "" : " disabled") + ">" +
-          (app.kill ? "熔断中" : !paperEnabled() ? "模拟暂停" : d.net <= 0 ? "净边为负" : settleBlocked ? "结算冻结 · <" + settleDays + "天" : deltaBlocked ? "Delta 超限" : statusBlocked ? d.statusText : "执行套利") + "</button>" +
+          (app.kill ? "熔断中" : !paperEnabled() ? "模拟暂停" : d.net <= 0 ? "净边为负" : sizeBlocked ? "限额不足最小股数" : settleBlocked ? "结算冻结 · <" + settleDays + "天" : deltaBlocked ? "Delta 超限" : statusBlocked ? d.statusText : "执行套利") + "</button>" +
       "</div>";
 
     $("#drawer-root").hidden = false;
@@ -506,6 +576,7 @@ import { CONV as D, api, download } from "./store.js";
       if (!guard()) return;
       if (d.net <= 0) { toast("净边为负", "扣除两腿成本后没有正收益，这里不会替你开这个仓。", "neg"); return; }
       if (!paperEnabled()) { toast("模拟交易已暂停", "打开顶部「模拟交易」后再下单。", "warn"); return; }
+      if (sizeBlocked) { toast("可执行数量不足", "按当前净值、单笔上限、集中度与场所限额最多只能买 " + executableMax.toLocaleString("en-US") + " 股，低于最小 " + minQty + " 股。", "warn"); return; }
       if (settleBlocked) { toast("结算冻结", "该事件距结算 " + d.days.toFixed(1) + " 天，低于当前规则阈值 " + settleDays + " 天，只允许减仓。到「风控」可调整阈值。", "warn"); return; }
       if (deltaBlocked) { toast("Delta 超限", "真实 Delta " + Math.abs(d.delta).toFixed(1) + "x 超过当前上限 " + maxDelta + "x。到「风控」可调整阈值。", "warn"); return; }
       executeModal(d, qty, planProfit);
