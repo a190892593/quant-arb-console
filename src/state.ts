@@ -116,7 +116,7 @@ export function buildState(
       scanSeq: market.scanSeq,
       lastScanAt: market.lastScanAt,
       universe: market.events.length,
-      version: "2.1.0",
+      version: "2.2.0",
       startedAt: Number(repo.metaGet("engineStartedAt", String(Date.now())))
     },
     venues: [market.hlStatus, market.pmStatus],

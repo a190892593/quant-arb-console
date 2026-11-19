@@ -300,7 +300,7 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
 
   app.get("/api/health", async () => ({
     ok: true,
-    version: "2.1.0",
+    version: "2.2.0",
     uptime: Math.round(process.uptime()),
     time: new Date().toISOString(),
     venues: [market.hlStatus, market.pmStatus],
@@ -668,7 +668,7 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   app.get("/api/admin/status", async (req) => {
     requireAdmin(req);
     return {
-      version: "2.1.0",
+      version: "2.2.0",
       uptime: Math.round(process.uptime()),
       pid: process.pid,
       node: process.version,
