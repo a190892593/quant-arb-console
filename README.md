@@ -1,4 +1,4 @@
-# CONVERGENCE · 跨场所事件套利终端
+﻿# CONVERGENCE · 跨场所事件套利终端
 
 面向自营量化交易者的单一操作台：在 **Polymarket** 的事件合约与 **Hyperliquid** 的永续市场之间发现概率定价差，
 自动构建「买入事件合约 + 永续对冲」两条腿，并在异常时交还人工。
@@ -52,8 +52,8 @@ npm run doctor
 | 能力 | 状态 | 说明 |
 |---|---|---|
 | Hyperliquid 公共行情 | **已接入** | `metaAndAssetCtxs` / candles / 实时标记价与资金费率 |
-| Polymarket 公共行情 | **已实现适配器** | Gamma 市场目录 + 最佳买卖价；网络可达时自动切换为实时目录 |
-| Polymarket 网络 | **本开发环境不可达** | 域名解析到保留地址并 TLS 中断；服务会明确标记 `degraded` 并回退示例目录 |
+| Polymarket 公共行情 | **已接入并实测** | Gamma 市场目录 + 最佳买卖价；自动分页扫描 600 个活跃市场，可解析约 30–40 个加密事件 |
+| Polymarket 网络 | **可达** | 本机验证通过；部分网络/地区仍可能被阻断，服务会明确标记 `degraded` 并回退示例目录 |
 | 实盘下单 | **需要凭据** | 未配置私有凭据时，`TRADING_MODE=live` 会被拒绝，不会静默改用纸面 |
 | 默认成交 | **纸面撮合** | 按真实（或示例）盘口价格与延迟在服务端撮合，不向交易所发送订单 |
 
@@ -80,8 +80,8 @@ Polymarket 侧的示例买卖价。界面上会显示 `PM 示例盘口`，管理
 6. 先用最小规模验证一条完整的两腿链路，再放开限额。
 
 私有凭据只从环境变量读取，**不会写入数据库、不会返回浏览器、不会出现在日志中**。
-实盘下单路径尚未在本环境验证（缺少凭据且 Polymarket 网络不可达）；代码调用官方 SDK：
-`@nktkas/hyperliquid` 与 `@polymarket/clob-client`。
+实盘下单路径尚未用真实资金验证（缺少私有凭据）；Polymarket 公共目录与 Hyperliquid 行情均已实测。
+代码调用官方 SDK：`@nktkas/hyperliquid` 与 `@polymarket/clob-client`。
 
 ## 3. 功能清单
 
@@ -238,6 +238,8 @@ data/convergence.db        SQLite（首次启动生成，已 gitignore）
 
 - **公允概率**：由 HL 标记价、期限与波动率反推的数字期权价格（lognormal）。
   实时目录使用各标的 90 日已实现波动率（乘 1.08 溢价）；示例目录使用同一模型。
+  Polymarket 的 “reach / hit” 市场按**触碰概率**（连续监测、零漂移）定价，而不是到期终值数字期权，
+  避免系统性低估。
 - **毛边** = 公允概率 − Polymarket 中间价。
 - **成本** = PM 半价差 + HL 手续费 + 对冲滑点 + 资金费率 + 8bps 结算/预言机缓冲；
   手续费、滑点、资金费率均按 `|Delta|` 折算到合约面值。
@@ -282,7 +284,7 @@ data/convergence.db        SQLite（首次启动生成，已 gitignore）
 ## 7. 验证
 
 ```powershell
-npm test          # 30 项：领域定价、四账户资格、风控、API 集成（下单/成交/熔断/权限/CSRF/CSV）
+npm test          # 31 项：领域定价、四账户资格、风控、API 集成（下单/成交/熔断/权限/CSRF/CSV）
 npm run verify    # 33 项：启动真实服务 + headless Chromium 全流程 + 账户切换 + 管理视图 + 移动端
 ```
 
@@ -298,8 +300,9 @@ npm run verify    # 33 项：启动真实服务 + headless Chromium 全流程 + 
 
 ## 9. 已知边界
 
-1. **Polymarket 网络**：本开发环境无法访问 `gamma-api.polymarket.com` / `clob.polymarket.com`，
-   实时目录与 PM 实盘链路未能端到端验证。代码、降级与状态展示已完成。
+1. **Polymarket 网络**：本机已验证 `gamma-api.polymarket.com` 可达，实时目录加载 34 个市场；
+   部分地区/网络仍可能被阻断，服务会自动降级并在界面标记。Polymarket 盘口目前使用 Gamma 最优买卖价，
+   尚未接入 WebSocket 增量订单簿；实盘前建议增加 CLOB 盘口与撤单回报对账。
 2. **实盘凭据**：未提供私有密钥，因此 HL/PM 的真实下单只做了类型与流程实现，未进行真实成交验证。
    在拿到凭据前请保持 `TRADING_MODE=paper`。
 3. **行情通道**：使用 HTTP 轮询 + SSE 推送，未接 WebSocket 订单簿增量；生产可替换适配层。

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { derive, book, digitalFair, hedgeDelta, DEFAULT_COST } from "../dist/domain/pricing.js";
+import { derive, book, digitalFair, touchFair, hedgeDelta, DEFAULT_COST } from "../dist/domain/pricing.js";
 
 const day = 86_400_000;
 const now = Date.parse("2026-11-19T00:00:00Z");
@@ -66,6 +66,14 @@ test("digitalFair: ATM digital is near 50% and reverses for the other side", () 
   const down = digitalFair({ spot: 100, strike: 100, vol: 0.6, days: 30, direction: -1 });
   assert.ok(up > 0.4 && up < 0.55, String(up));
   assert.ok(Math.abs(up + down - 1) < 1e-9);
+});
+
+test("touchFair prices a reach market above the terminal digital price", () => {
+  const args = { spot: 63_000, strike: 70_000, vol: 0.55, days: 11 };
+  const touch = touchFair(args);
+  const digital = digitalFair({ ...args, direction: 1 });
+  assert.ok(touch > digital, `${touch} vs ${digital}`);
+  assert.ok(touch > 0.25 && touch < 0.45, String(touch));
 });
 
 test("hedgeDelta keeps the direction sign and stays within the sizing band", () => {

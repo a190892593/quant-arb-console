@@ -1,6 +1,6 @@
 import { config, type MarketDataMode } from "../config.js";
 import type { Repository } from "../db/repository.js";
-import { digitalFair, hedgeDelta, clamp } from "../domain/pricing.js";
+import { digitalFair, hedgeDelta, clamp, touchFair } from "../domain/pricing.js";
 import type { EventContract, Market, MarketTick, VenueStatus } from "../domain/types.js";
 import { DAY_MS } from "../util.js";
 import { generateDemoCatalog } from "./demo-catalog.js";
@@ -149,13 +149,20 @@ export class MarketService {
     for (const ev of this.events) {
       if (ev.model) {
         const days = Math.max(0.25, (Date.parse(ev.due) - now) / DAY_MS);
-        const fair = digitalFair({
-          spot: ev.model.spot ?? this.market[ev.und]?.px ?? 0,
-          strike: ev.model.strike,
-          vol: ev.model.vol,
-          days,
-          direction: ev.model.direction
-        });
+        const fair = ev.model.kind === "touch"
+          ? touchFair({
+              spot: ev.model.spot ?? this.market[ev.und]?.px ?? 0,
+              strike: ev.model.strike,
+              vol: ev.model.vol,
+              days
+            })
+          : digitalFair({
+              spot: ev.model.spot ?? this.market[ev.und]?.px ?? 0,
+              strike: ev.model.strike,
+              vol: ev.model.vol,
+              days,
+              direction: ev.model.direction
+            });
         if (fair != null) ev.fair = +fair.toFixed(4);
         ev.delta = hedgeDelta({
           spot: ev.model.spot ?? this.market[ev.und]?.px ?? 0,

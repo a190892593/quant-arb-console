@@ -247,6 +247,20 @@ export function digitalFair(input: { spot: number; strike: number; vol: number; 
   return direction < 0 ? 1 - call : call;
 }
 
+/**
+ * Probability that the spot ever touches the strike before expiry (continuous
+ * monitoring, zero drift). Polymarket's "reach / hit" markets are touch options,
+ * not terminal digital options; using the digital price systematically underprices them.
+ */
+export function touchFair(input: { spot: number; strike: number; vol: number; days: number }): number | null {
+  const { spot, strike, vol, days } = input;
+  if (!(spot > 0) || !(strike > 0)) return null;
+  const T = Math.max(1 / 365, days / 365);
+  const sigma = Math.max(0.01, vol);
+  const distance = Math.abs(Math.log(strike / spot)) / (sigma * Math.sqrt(T));
+  return clamp(2 * normalCdf(-distance), 0.001, 0.999);
+}
+
 /** Normalised hedge ratio used for perp sizing (0.5%–60% of contract face). */
 export function hedgeDelta(input: { spot: number; strike: number; vol: number; days: number; direction: 1 | -1 }): number {
   const { spot, strike, vol, days, direction } = input;

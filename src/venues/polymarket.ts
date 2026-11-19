@@ -1,5 +1,5 @@
 import { config } from "../config.js";
-import { digitalFair, hedgeDelta, clamp } from "../domain/pricing.js";
+import { digitalFair, hedgeDelta, clamp, touchFair } from "../domain/pricing.js";
 import type { EventContract, Market, VenueStatus } from "../domain/types.js";
 
 const TIMEOUT = 9_000;
@@ -119,9 +119,16 @@ function parseJsonArray(text: string | undefined): string[] {
 
 /** Build the live scanner universe from Polymarket Gamma markets. */
 export async function fetchCatalog(market: Market, vols: Record<string, number>): Promise<PmCatalog> {
-  const url = `${config.pm.gammaUrl}/markets?active=true&closed=false&limit=500&order=volume24hr&ascending=false`;
-  const raw = await getJson<GammaMarket[] | { data?: GammaMarket[] }>(url);
-  const list = Array.isArray(raw) ? raw : (raw.data ?? []);
+  const PAGE = 100;
+  const MAX_PAGES = 6;
+  const list: GammaMarket[] = [];
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const url = `${config.pm.gammaUrl}/markets?active=true&closed=false&limit=${PAGE}&offset=${page * PAGE}&order=volume24hr&ascending=false`;
+    const raw = await getJson<GammaMarket[] | { data?: GammaMarket[] }>(url);
+    const batch = Array.isArray(raw) ? raw : (raw.data ?? []);
+    list.push(...batch);
+    if (batch.length < PAGE) break;
+  }
   const events: EventContract[] = [];
   const seen = new Set<string>();
   let parsed = 0;
@@ -139,7 +146,9 @@ export async function fetchCatalog(market: Market, vols: Record<string, number>)
     const days = (dueMs - Date.now()) / 86_400_000;
     if (days > 400 || days < 0.5) continue;
     const vol = vols[p.coin] ?? 0.7;
-    const fair = digitalFair({ spot, strike: p.strike, vol, days, direction: p.direction });
+    const fair = p.kind === "touch"
+      ? touchFair({ spot, strike: p.strike, vol, days })
+      : digitalFair({ spot, strike: p.strike, vol, days, direction: p.direction });
     if (fair == null) continue;
     const tokens = parseJsonArray(m.clobTokenIds);
     const outcomes = parseJsonArray(m.outcomes);

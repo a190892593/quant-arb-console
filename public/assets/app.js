@@ -311,7 +311,9 @@ import { CONV as D, api, download } from "./store.js";
     const qty = Math.max(100, Math.round(d.depth * 0.65 / d.ask / 100) * 100);
     const planProfit = qty * d.net / 100;
     // 净边为负时不放行：能点开详情不等于应该下单。
-    const canExecute = !app.kill && d.net > 0;
+    const settleFreeze = app.rules.some(r => r.id === "settle-freeze" && r.on);
+    const settleBlocked = settleFreeze && d.days < 2;
+    const canExecute = !app.kill && d.net > 0 && !settleBlocked;
     const costs = [
       ["PM 点差", d.spreadBps],
       ["HL 手续费", d.feeBps],
@@ -421,7 +423,7 @@ import { CONV as D, api, download } from "./store.js";
           (planProfit < 0 ? ' class="neg"' : "") + ">" + signedUsd(planProfit, 0) + "</b></div>" +
         '<button class="btn btn-ghost btn-sm" id="simulate-btn">模拟</button>' +
         '<button class="btn btn-primary" id="execute-btn"' + (canExecute ? "" : " disabled") + ">" +
-          (app.kill ? "熔断中" : d.net <= 0 ? "净边为负" : "执行套利") + "</button>" +
+          (app.kill ? "熔断中" : d.net <= 0 ? "净边为负" : settleBlocked ? "结算冻结" : "执行套利") + "</button>" +
       "</div>";
 
     $("#drawer-root").hidden = false;
@@ -438,6 +440,7 @@ import { CONV as D, api, download } from "./store.js";
     $("#execute-btn").addEventListener("click", () => {
       if (!guard()) return;
       if (d.net <= 0) { toast("净边为负", "扣除两腿成本后没有正收益，这里不会替你开这个仓。", "neg"); return; }
+      if (settleBlocked) { toast("结算冻结", "该事件 48 小时内结算，规则只允许减仓，不允许新开。", "warn"); return; }
       executeModal(d, qty, planProfit);
     });
   }
