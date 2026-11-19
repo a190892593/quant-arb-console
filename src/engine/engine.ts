@@ -45,6 +45,7 @@ export class Engine {
   private persistedAt = 0;
   private lastReviewsPersist = 0;
   private lastAutoAt = new Map<AccountId, number>();
+  private lastRehedgeAt = 0;
 
   constructor(private readonly repo: Repository, private readonly market: MarketService) {}
 
@@ -103,10 +104,64 @@ export class Engine {
       });
       for (const account of this.accounts()) {
         if (!account.enabled) continue;
+        this.sampleEquity(account.id);
         void this.maybeAutoExecute(account.id);
       }
+      void this.maybeRehedge();
     } catch (err) {
       logger.warn({ err: (err as Error).message }, "scan tick failed");
+    }
+  }
+
+  /**
+   * Delta drifts with spot, vol and time. Re-hedge each position when its
+   * residual exceeds max($500, 3% of the target hedge notional).
+   */
+  private async maybeRehedge(): Promise<void> {
+    if (Date.now() - this.lastRehedgeAt < 5_000) return;
+    this.lastRehedgeAt = Date.now();
+    for (const account of this.accounts()) {
+      if (!account.enabled || account.kill) continue;
+      if (!this.rules(account.id).find(r => r.id === "gap-fill")?.on) continue;
+      const b = this.book(account.id);
+      for (const row of b.rows) {
+        if (row.target <= 0) continue;
+        const drift = row.target - row.hedgeUsd;
+        const band = Math.max(500, row.target * 0.03);
+        if (Math.abs(drift) < band) continue;
+        const p = this.repo.positionsAll(account.id).find(x => x.evId === row.evId);
+        if (!p) continue;
+        if (p.hedgeSide && p.hedgeSide !== row.targetSide && p.hedgeUsd > 0) {
+          this.riskEvent(account.id, {
+            level: "warn", title: "Delta 方向翻转",
+            detail: `${row.ev.title} 的 Delta 方向由 ${p.hedgeSide} 变为 ${row.targetSide}，需人工处理`,
+            val: "待接管"
+          });
+          continue;
+        }
+        const mk = this.market.market[row.ev.und]?.px ?? p.hedgeEntry;
+        if (this.tradingMode() === "live") {
+          const res = await hl.placeOrder({
+            coin: row.ev.und,
+            isBuy: row.targetSide === "long" ? drift > 0 : drift < 0,
+            size: Math.abs(drift) / mk,
+            price: mk * (row.targetSide === "long" ? 1.005 : 0.995),
+            reduceOnly: drift < 0
+          });
+          if (!res.ok) {
+            this.riskEvent(account.id, { level: "bad", title: "自动再平衡失败", detail: res.error ?? "HL 订单失败", val: row.ev.und });
+            continue;
+          }
+        }
+        p.hedgeEntry = drift > 0
+          ? (p.hedgeUsd * p.hedgeEntry + drift * mk) / Math.max(0.0001, p.hedgeUsd + drift)
+          : p.hedgeEntry;
+        p.hedgeUsd = row.target;
+        p.hedgeSide = row.targetSide;
+        this.repo.positionUpsert(account.id, p);
+        this.log({ id: "system", name: "自动引擎", role: "admin" }, account.id, "自动再平衡", row.ev.title, "HL",
+          `对冲调整 ${usd(drift, 0)}，残余 Delta 回到容差内`);
+      }
     }
   }
 
@@ -129,7 +184,7 @@ export class Engine {
       .sort((a, b) => b.net - a.net);
     const best = candidates[0];
     if (!best) return;
-    const equity = account.equity;
+    const equity = this.currentEquity(accountId);
     const maxByDepth = Math.floor((best.depth * 0.4) / best.ask / 100) * 100;
     const maxByEquity = Math.floor((equity * 0.06) / best.ask / 100) * 100;
     const qty = Math.max(100, Math.min(maxByDepth, maxByEquity, 40_000 / best.ask));
@@ -177,6 +232,7 @@ export class Engine {
       const orders = this.repo.ordersAll(a.id);
       const open = orders.filter(o => o.status !== "filled" && o.status !== "failed");
       const derived = this.derived(a.id);
+      const current = Math.max(0, a.equity + (a.realizedPnl ?? 0) + book.pnl);
       return {
         ...a,
         name: def.name,
@@ -186,15 +242,22 @@ export class Engine {
         holdLabel: def.holdLabel,
         maxOpen: def.maxOpen,
         requiresRealtime: def.requiresRealtime === true,
+        equity: +current.toFixed(2),
+        startingEquity: a.equity,
+        realizedPnl: +(a.realizedPnl ?? 0).toFixed(2),
+        totalPnl: +((a.realizedPnl ?? 0) + book.pnl).toFixed(2),
+        returnPct: a.equity > 0 ? ((a.realizedPnl ?? 0) + book.pnl) / a.equity : 0,
         pnl: +book.pnl.toFixed(2),
-        usedPct: a.equity > 0 ? (book.cost + book.margin) / a.equity : 0,
+        usedPct: current > 0 ? (book.cost + book.margin) / current : 0,
         positions: book.rows.length,
         openOrders: open.length,
         signals: derived.length,
         ready: derived.filter(d => d.status === "ready").length,
-        dailyLossPct: dailyLossPct(this.repo, a.id, a.equity + book.pnl),
+        dailyLossPct: dailyLossPct(this.repo, a.id, current),
         bookCost: +book.cost.toFixed(2),
-        netDelta: +book.netDelta.toFixed(2)
+        netDelta: +book.netDelta.toFixed(2),
+        closedTrades: a.closedTrades ?? 0,
+        wins: a.wins ?? 0
       };
     });
   }
@@ -229,7 +292,10 @@ export class Engine {
     });
   }
 
-  currentEquity(accountId: AccountId): number { return this.account(accountId).equity; }
+  currentEquity(accountId: AccountId): number {
+    const a = this.account(accountId);
+    return Math.max(0, a.equity + (a.realizedPnl ?? 0) + this.book(accountId).pnl);
+  }
 
   limits(accountId: AccountId): Limit[] {
     const rows = this.repo.limitsAll(accountId);
@@ -245,7 +311,7 @@ export class Engine {
         : l.id === "hl" ? 0.1
         : l.id === "delta" ? 0.2
         : settleRatio;
-      return { ...l, value: Math.max(10_000, Math.round(equity * ratio / 1000) * 1000) };
+      return { ...l, value: Math.max(100, Math.round(equity * ratio / 100) * 100) };
     });
   }
 
@@ -347,10 +413,11 @@ export class Engine {
     const book = this.book(input.accountId);
     const limits = this.limitsWithUsage(input.accountId);
     const rules = this.rules(input.accountId);
+    const equityNow = this.currentEquity(input.accountId);
     const check = checkOrder({
-      event: d, qty, book, limits, rules, equity: account.equity,
+      event: d, qty, book, limits, rules, equity: equityNow,
       kill: account.kill, auto: account.auto, source,
-      dailyLossPct: dailyLossPct(this.repo, input.accountId, account.equity + book.pnl),
+      dailyLossPct: dailyLossPct(this.repo, input.accountId, equityNow),
       ackFatEdge: input.ackFatEdge,
       strategy: input.accountId
     });
@@ -364,6 +431,7 @@ export class Engine {
     const id = this.nextOrderId();
     const mark = this.market.market[d.und]?.px ?? 0;
     const hedge = qty * Math.abs(d.delta);
+    const hedgeSide: "long" | "short" = d.delta >= 0 ? "short" : "long";
     const def = accountDef(input.accountId);
     const order: Order = {
       id,
@@ -387,15 +455,15 @@ export class Engine {
           note: mode === "live" ? "等待 Polymarket 市价单回报" : "等待撮合"
         },
         {
-          venue: "HYPERLIQUID", side: "short", label: `做空 ${d.und}-PERP`,
+          venue: "HYPERLIQUID", side: hedgeSide, label: `${hedgeSide === "short" ? "做空" : "做多"} ${d.und}-PERP`,
           qty: +hedge.toFixed(4), filled: 0, price: mark, notional: 0, done: false,
-          note: "合约腿完成后启动，避免裸敞口"
+          note: "合约腿完成后立即发送，缩短裸敞口窗口"
         }
       ]
     };
     this.repo.orderUpsert(input.accountId, order);
     this.log(user, input.accountId, "开仓", d.title, "PM + HL",
-      `${def.name} · ${source === "auto" ? "自动" : "人工"}买入 ${qty.toLocaleString("en-US")} YES @ ${(d.ask * 100).toFixed(1)}¢；对冲 ${d.und}-PERP ${usd(hedge, 0)}`);
+      `${def.name} · ${source === "auto" ? "自动" : "人工"}买入 ${qty.toLocaleString("en-US")} YES @ ${(d.ask * 100).toFixed(1)}¢；${hedgeSide === "short" ? "做空" : "做多"} ${d.und}-PERP ${usd(hedge, 0)}（真实 Delta ${d.delta.toFixed(2)}x）`);
     this.feed(input.accountId, {
       kind: "ok", title: `${def.name}开仓 ${d.title}`,
       detail: `${qty.toLocaleString("en-US")} YES @ ${(d.ask * 100).toFixed(1)}¢`, val: "执行中"
@@ -426,7 +494,8 @@ export class Engine {
 
     const px = this.market.market[d.und]?.px ?? 0;
     const hedge = order.legs[0].filled * Math.abs(d.delta);
-    const hlResult = await hl.placeOrder({ coin: d.und, isBuy: false, size: hedge / px, price: px * 0.995 });
+    const isBuyHedge = d.delta < 0;
+    const hlResult = await hl.placeOrder({ coin: d.und, isBuy: isBuyHedge, size: hedge / px, price: px * (isBuyHedge ? 1.005 : 0.995) });
     if (!hlResult.ok) {
       this.repo.orderUpsert(accountId, order);
       this.createReview(accountId, {
@@ -489,33 +558,26 @@ export class Engine {
         const d = this.market.events.find(e => e.id === o.evId);
         if (!d) continue;
         if (o.status === "leg1" && age >= 900) {
+          const px = this.market.market[d.und]?.px ?? o.legs[1].price;
+          const side: "long" | "short" = o.legs[1].side === "long" ? "long" : "short";
           o.legs[0].filled = o.qty;
           o.legs[0].notional = +(o.qty * o.legs[0].price).toFixed(2);
           o.legs[0].done = true;
           o.legs[0].note = "合约腿全额成交";
-          o.status = "hedging";
-          o.statusText = "对冲中";
-          this.repo.orderUpsert(account.id, o);
-          this.log({ id: "system", name: "自动引擎", role: "admin" }, account.id, "合约腿成交", d.title, "PM",
-            `${o.qty.toLocaleString("en-US")} YES @ ${(o.legs[0].price * 100).toFixed(1)}¢`);
-          changed = true;
-          continue;
-        }
-        if (o.status === "hedging" && age >= account.paperFillMs) {
-          const px = this.market.market[d.und]?.px ?? o.legs[1].price;
           o.legs[1].filled = o.legs[1].qty;
-          o.legs[1].price = +(px * 1.0006).toFixed(4);
+          o.legs[1].price = +(px * (side === "long" ? 1.0006 : 0.9994)).toFixed(4);
           o.legs[1].notional = +o.legs[1].filled.toFixed(2);
           o.legs[1].done = true;
-          o.legs[1].note = "已全额成交 · 滑点 4.2bps";
+          o.legs[1].note = "与合约腿同一撮合批次成交 · 无裸敞口窗口";
           o.status = "filled";
           o.statusText = "已成交";
           this.repo.orderUpsert(account.id, o);
           this.applyOrderToPosition(account.id, o, d);
-          this.log({ id: "system", name: "自动引擎", role: "admin" }, account.id, "两腿对齐", d.title, "HL",
-            `对冲腿全额成交 ${usd(o.legs[1].notional, 0)}，滑点 4.2bps；头寸已进入账户账本`);
-          this.feed(account.id, { kind: "ok", title: `两腿对齐 ${d.title}`, detail: `对冲 ${usd(o.legs[1].notional, 0)}`, val: "已成交" });
+          this.log({ id: "system", name: "自动引擎", role: "admin" }, account.id, "两腿原子成交", d.title, "PM + HL",
+            `${o.qty.toLocaleString("en-US")} YES @ ${(o.legs[0].price * 100).toFixed(1)}¢；${side === "short" ? "做空" : "做多"} ${usd(o.legs[1].notional, 0)} ${d.und}-PERP`);
+          this.feed(account.id, { kind: "ok", title: `两腿对齐 ${d.title}`, detail: `${side === "short" ? "做空" : "做多"} ${usd(o.legs[1].notional, 0)}`, val: "已成交" });
           changed = true;
+          continue;
         }
       }
       if (changed) this.touch();
@@ -527,18 +589,20 @@ export class Engine {
     const held = positions.find(p => p.evId === order.evId);
     const hedge = order.legs[1].filled;
     const hedgePx = order.legs[1].price || this.market.market[d.und]?.px || 0;
+    const hedgeSide: "long" | "short" = order.legs[1].side === "long" ? "long" : "short";
     if (held) {
       const totalQty = held.qty + order.qty;
       held.avg = (held.avg * held.qty + order.legs[0].price * order.qty) / totalQty;
       held.hedgeEntry = (held.hedgeUsd * held.hedgeEntry + hedge * hedgePx) / Math.max(0.0001, held.hedgeUsd + hedge);
       held.qty = totalQty;
       held.hedgeUsd += hedge;
+      held.hedgeSide = hedgeSide;
       held.accountId = accountId;
       this.repo.positionUpsert(accountId, held);
     } else {
       this.repo.positionUpsert(accountId, {
         evId: order.evId, qty: order.qty, avg: order.legs[0].price,
-        hedgeUsd: hedge, hedgeEntry: hedgePx, accountId,
+        hedgeUsd: hedge, hedgeEntry: hedgePx, hedgeSide, accountId,
         openedAt: new Date().toISOString()
       });
     }
@@ -556,10 +620,14 @@ export class Engine {
     const gap = Math.max(0, order.legs[1].qty - order.legs[1].filled);
     if (gap <= 0.01) return order;
 
+    const hedgeSide: "long" | "short" = order.legs[1].side === "long" ? "long" : "short";
     let filledUsd = gap;
-    let fillPx = px * 1.0007;
+    let fillPx = px * (hedgeSide === "long" ? 1.0007 : 0.9993);
     if (order.live && this.tradingMode() === "live") {
-      const result = await hl.placeOrder({ coin: d.und, isBuy: false, size: gap / px, price: px * 0.995 });
+      const result = await hl.placeOrder({
+        coin: d.und, isBuy: hedgeSide === "long", size: gap / px,
+        price: px * (hedgeSide === "long" ? 1.005 : 0.995)
+      });
       if (!result.ok) throw new EngineError("hedge_failed", `Hyperliquid 补对冲失败：${result.error}`, 502);
       fillPx = result.avgPrice ?? px;
       filledUsd = (result.filledQty ?? gap / px) * fillPx;
@@ -588,7 +656,7 @@ export class Engine {
     if (!order) throw new EngineError("order_not_found", "订单不存在", 404);
     const d = this.market.events.find(e => e.id === order.evId);
     if (order.live && this.tradingMode() === "live" && d) {
-      await this.closeLiveLegs(accountId, d, order.qty, order.legs[0].filled, order.legs[1].filled);
+      await this.closeLiveLegs(accountId, d, order.qty, order.legs[0].filled, order.legs[1].filled, order.legs[1].side === "long" ? "long" : "short");
     }
     this.repo.orderDelete(accountId, id);
     if (order.status === "filled" && d) this.closePositionPart(user, accountId, order.evId, order.qty);
@@ -597,14 +665,18 @@ export class Engine {
     this.touch();
   }
 
-  private async closeLiveLegs(accountId: AccountId, d: EventContract, qty: number, pmShares: number, hedgeUsd: number): Promise<void> {
+  private async closeLiveLegs(accountId: AccountId, d: EventContract, qty: number, pmShares: number, hedgeUsd: number, hedgeSide: "long" | "short" = "short"): Promise<void> {
     const tokenId = d.external?.tokenId;
     if (!tokenId) throw new EngineError("live_close_unavailable", "该事件没有 Polymarket token，无法实盘平仓", 409);
     const px = this.market.market[d.und]?.px ?? 0;
     const pmResult = await pm.placeOrder({ tokenId, side: "SELL", shares: pmShares });
     if (!pmResult.ok) throw new EngineError("pm_close_failed", `Polymarket 平仓失败：${pmResult.error}`, 502);
     if (hedgeUsd > 0.01 && px > 0) {
-      const hlResult = await hl.placeOrder({ coin: d.und, isBuy: true, size: hedgeUsd / px, price: px * 1.005, reduceOnly: true });
+      const closeBuy = hedgeSide === "short";
+      const hlResult = await hl.placeOrder({
+        coin: d.und, isBuy: closeBuy, size: hedgeUsd / px,
+        price: px * (closeBuy ? 1.005 : 0.995), reduceOnly: true
+      });
       if (!hlResult.ok) {
         this.createReview(accountId, {
           evId: d.id, kind: "实盘平仓失败",
@@ -634,9 +706,12 @@ export class Engine {
     const closeQty = Math.min(p.qty, qty ?? p.qty);
     const frac = closeQty / p.qty;
     const contractPnl = closeQty * (d.bid - p.avg);
-    const hedgePnl = p.hedgeUsd * (p.hedgeEntry - mark) / Math.max(0.0001, p.hedgeEntry) * frac;
+    const side = p.hedgeSide ?? "short";
+    const hedgePnl = (side === "long"
+      ? p.hedgeUsd * (mark - p.hedgeEntry) / Math.max(0.0001, p.hedgeEntry)
+      : p.hedgeUsd * (p.hedgeEntry - mark) / Math.max(0.0001, p.hedgeEntry)) * frac;
     const realized = contractPnl + hedgePnl;
-    this.adjustEquity(accountId, realized);
+    this.realizePnl(accountId, realized, 1, realized > 0 ? 1 : 0);
     if (closeQty >= p.qty - 0.01) this.repo.positionDelete(accountId, evId);
     else {
       p.qty -= closeQty;
@@ -656,18 +731,26 @@ export class Engine {
     const d = this.market.events.find(e => e.id === evId);
     if (!d) throw new EngineError("event_not_found", "事件不存在", 404);
     const target = p.qty * Math.abs(d.delta);
-    if (p.hedgeUsd >= target * 0.999) throw new EngineError("already_aligned", "该头寸的对冲比例已经达到目标");
-    const add = target - p.hedgeUsd;
+    const targetSide: "long" | "short" = d.delta >= 0 ? "short" : "long";
+    if (Math.abs(p.hedgeUsd - target) < Math.max(1, target * 0.001)) throw new EngineError("already_aligned", "该头寸已经是 Delta 中性");
+    const diff = target - p.hedgeUsd;
     const mk = this.market.market[d.und]?.px ?? p.hedgeEntry;
     if (this.tradingMode() === "live") {
-      const res = await hl.placeOrder({ coin: d.und, isBuy: false, size: add / mk, price: mk * 0.995 });
+      const res = await hl.placeOrder({
+        coin: d.und, isBuy: targetSide === "long" ? diff > 0 : diff < 0,
+        size: Math.abs(diff) / mk, price: mk * (targetSide === "long" ? 1.005 : 0.995),
+        reduceOnly: Math.abs(p.hedgeUsd) > target
+      });
       if (!res.ok) throw new EngineError("hedge_failed", `Hyperliquid 补对冲失败：${res.error}`, 502);
     }
-    p.hedgeEntry = (p.hedgeUsd * p.hedgeEntry + add * mk) / (p.hedgeUsd + add);
+    p.hedgeEntry = diff > 0
+      ? (p.hedgeUsd * p.hedgeEntry + diff * mk) / Math.max(0.0001, p.hedgeUsd + diff)
+      : p.hedgeEntry;
     p.hedgeUsd = target;
+    p.hedgeSide = targetSide;
     this.repo.positionUpsert(accountId, p);
-    this.log(user, accountId, "补对冲", d.title, "HL", `追加 ${d.und}-PERP ${usd(add, 0)}，对冲比例回到 100%`);
-    this.feed(accountId, { kind: "ok", title: "对齐对冲腿", detail: d.title, val: usd(add, 0) });
+    this.log(user, accountId, "补对冲", d.title, "HL", `调整 ${d.und}-PERP ${usd(diff, 0)}，真实 Delta 对齐至 0`);
+    this.feed(accountId, { kind: "ok", title: "对齐对冲腿", detail: d.title, val: usd(Math.abs(diff), 0) });
     this.touch();
   }
 
@@ -677,18 +760,25 @@ export class Engine {
     const b = this.book(accountId);
     let count = 0;
     for (const row of b.rows) {
-      if (row.ratio >= 0.999) continue;
+      if (Math.abs(row.ratio - 1) < 0.01) continue;
       const p = this.repo.positionsAll(accountId).find(x => x.evId === row.evId);
       if (!p) continue;
-      const add = row.target - p.hedgeUsd;
-      if (add <= 0) continue;
+      const diff = row.target - p.hedgeUsd;
+      if (Math.abs(diff) < 1) continue;
       const mk = this.market.market[row.ev.und]?.px ?? p.hedgeEntry;
       if (this.tradingMode() === "live") {
-        const res = await hl.placeOrder({ coin: row.ev.und, isBuy: false, size: add / mk, price: mk * 0.995 });
+        const res = await hl.placeOrder({
+          coin: row.ev.und, isBuy: row.targetSide === "long" ? diff > 0 : diff < 0,
+          size: Math.abs(diff) / mk, price: mk * (row.targetSide === "long" ? 1.005 : 0.995),
+          reduceOnly: p.hedgeUsd > row.target
+        });
         if (!res.ok) throw new EngineError("hedge_failed", `${row.ev.und} 补对冲失败：${res.error}`, 502);
       }
-      p.hedgeEntry = (p.hedgeUsd * p.hedgeEntry + add * mk) / (p.hedgeUsd + add);
+      p.hedgeEntry = diff > 0
+        ? (p.hedgeUsd * p.hedgeEntry + diff * mk) / Math.max(0.0001, p.hedgeUsd + diff)
+        : p.hedgeEntry;
       p.hedgeUsd = row.target;
+      p.hedgeSide = row.targetSide;
       this.repo.positionUpsert(accountId, p);
       count++;
     }
@@ -708,17 +798,25 @@ export class Engine {
     if (!(input.sizeUsd >= 1000)) throw new EngineError("size_too_small", "最低 1,000 USDC");
     const qty = Math.floor(input.sizeUsd / d.ask / 100) * 100;
     if (qty < 100) throw new EngineError("size_too_small", "规模不足以买入最小股数");
-    if (qty * d.ask > account.equity * 0.25) throw new EngineError("size_too_large", "单笔不得超过账户净值的 25%");
+    const equityNow = this.currentEquity(accountId);
+    if (qty * d.ask > equityNow * 0.25) throw new EngineError("size_too_large", "单笔不得超过账户净值的 25%");
+    const check = checkOrder({
+      event: d, qty, book: this.book(accountId), limits: this.limitsWithUsage(accountId),
+      rules: this.rules(accountId), equity: equityNow, kill: account.kill, auto: account.auto,
+      source: "manual", dailyLossPct: dailyLossPct(this.repo, accountId, equityNow), strategy: accountId
+    });
+    if (!check.ok) throw new EngineError("risk_rejected", check.failures.map(f => f.message).join(" "), 409);
     const target = qty * Math.abs(d.delta);
-    const hedge = target * 0.96;
+    const hedge = target;
+    const hedgeSide: "long" | "short" = d.delta >= 0 ? "short" : "long";
     const mark = this.market.market[d.und]?.px ?? 1;
     const p: Position = {
       evId: d.id, qty, avg: d.ask, hedgeUsd: +hedge.toFixed(2), hedgeEntry: mark,
-      accountId, openedAt: new Date().toISOString()
+      hedgeSide, accountId, openedAt: new Date().toISOString()
     };
     this.repo.positionUpsert(accountId, p);
     this.log(user, accountId, "建立组合", d.title, "PM + HL",
-      `${accountDef(accountId).name} · 买入 ${qty.toLocaleString("en-US")} YES @ ${(d.ask * 100).toFixed(1)}¢；对冲 ${d.und}-PERP ${usd(hedge, 0)}`);
+      `${accountDef(accountId).name} · 买入 ${qty.toLocaleString("en-US")} YES @ ${(d.ask * 100).toFixed(1)}¢；${hedgeSide === "short" ? "做空" : "做多"} ${d.und}-PERP ${usd(hedge, 0)}（真实 Delta ${d.delta.toFixed(2)}x）`);
     this.feed(accountId, { kind: "ok", title: "建立对冲组合", detail: d.title, val: usd(input.sizeUsd, 0) });
     this.touch();
     return p;
@@ -734,7 +832,7 @@ export class Engine {
       throw new EngineError("nothing_to_close", "该账户的执行台与持仓账本都已经是空的", 409);
     }
     const pnl = b.pnl;
-    this.adjustEquity(accountId, pnl);
+    this.realizePnl(accountId, pnl, b.rows.length, b.rows.filter(r => r.pnl > 0).length);
     this.repo.clearTradingState(accountId);
     this.log(user, accountId, "全部平仓", "账户全组合", "PM + HL",
       `${legs} 条腿按对手价平仓，实现盈亏 ${signedUsd(pnl)}，账本清零`);
@@ -771,7 +869,7 @@ export class Engine {
     const d = this.market.events.find(e => e.id === r.evId);
     const p = this.repo.positionsAll(accountId).find(x => x.evId === r.evId);
     try {
-      if (this.tradingMode() === "live" && d && p) await this.closeLiveLegs(accountId, d, p.qty, p.qty, p.hedgeUsd);
+      if (this.tradingMode() === "live" && d && p) await this.closeLiveLegs(accountId, d, p.qty, p.qty, p.hedgeUsd, p.hedgeSide ?? "short");
     } catch (err) {
       this.riskEvent(accountId, { level: "bad", title: "自动平仓失败", detail: (err as Error).message, val: r.id });
       this.createReview(accountId, {
@@ -813,7 +911,7 @@ export class Engine {
     if (!r) throw new EngineError("review_not_found", "待接管订单不存在", 404);
     const d = this.market.events.find(e => e.id === r.evId);
     const p = this.repo.positionsAll(accountId).find(x => x.evId === r.evId);
-    if (this.tradingMode() === "live" && d && p) await this.closeLiveLegs(accountId, d, p.qty, p.qty, p.hedgeUsd);
+    if (this.tradingMode() === "live" && d && p) await this.closeLiveLegs(accountId, d, p.qty, p.qty, p.hedgeUsd, p.hedgeSide ?? "short");
     this.repo.reviewDelete(accountId, id);
     this.closePositionPart(user, accountId, r.evId);
     this.log(user, accountId, "立即平仓", d?.title ?? r.evId, "PM + HL", `待接管订单 ${r.id} 两条腿已提交平仓`);
@@ -910,33 +1008,34 @@ export class Engine {
       throw new EngineError("fill_invalid", "纸面成交延迟至少 200ms", 409);
     }
     const next = saveAccountSettings(this.repo, accountId, patch);
-    if (patch.equity != null && patch.equity !== account.equity) {
-      const delta = patch.equity - account.equity;
-      const points = this.repo.equityAll(accountId);
-      if (points.length) {
-        const last = points[points.length - 1]!;
-        last.v = Math.max(1, last.v + delta);
-        this.repo.equityReplace(accountId, points);
-      }
-    }
+    if (patch.equity != null && patch.equity !== account.equity) this.sampleEquity(accountId, true);
     this.log(user, accountId, "调整账户", accountDef(accountId).name, "后台",
       Object.entries(patch).map(([k, v]) => `${k}=${v}`).join(" · "));
     this.touch();
     return next;
   }
 
-  /* ---------------- equity ---------------- */
-  private adjustEquity(accountId: AccountId, delta: number): void {
-    if (!Number.isFinite(delta) || delta === 0) return;
+  /* ---------------- equity / realized pnl ---------------- */
+  private realizePnl(accountId: AccountId, delta: number, trades = 0, wins = 0): void {
+    if (!Number.isFinite(delta) && trades === 0) return;
     const account = this.account(accountId);
-    const next = Math.max(0, account.equity + delta);
-    saveAccountSettings(this.repo, accountId, { equity: next });
+    const realized = +((account.realizedPnl ?? 0) + (Number.isFinite(delta) ? delta : 0)).toFixed(2);
+    saveAccountSettings(this.repo, accountId, {
+      realizedPnl: realized,
+      closedTrades: (account.closedTrades ?? 0) + trades,
+      wins: (account.wins ?? 0) + wins
+    });
+    this.sampleEquity(accountId, true);
+  }
+
+  private sampleEquity(accountId: AccountId, force = false): void {
+    const current = this.currentEquity(accountId);
     const points = this.repo.equityAll(accountId);
-    if (points.length) {
-      const last = points[points.length - 1]!;
-      last.v = Math.max(1, last.v + delta);
-      this.repo.equityReplace(accountId, points);
-    }
+    const last = points[points.length - 1];
+    const now = Date.now();
+    if (!force && last && now - last.t < 5 * 60_000 && Math.abs(last.v - current) < 0.01) return;
+    this.repo.equityAppend(accountId, { t: now, v: +current.toFixed(2) });
+    this.repo.equityTrim(accountId, 5000);
   }
 
   /* ---------------- catalog ---------------- */

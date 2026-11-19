@@ -246,14 +246,14 @@
             <span class="kpi-meta">毛边中位数 <b id="kpi-gross">4.1¢</b> · 成本 <b id="kpi-cost">0.7¢</b></span>
           </div>
           <div class="kpi">
-            <span class="eyebrow">30 日胜率</span>
-            <b class="kpi-v num">92.4<i class="unit">%</i></b>
-            <span class="kpi-meta">287 笔已结算 · 22 笔亏损</span>
+            <span class="eyebrow">已实现盈亏</span>
+            <b class="kpi-v num" id="kpi-realized">$0</b>
+            <span class="kpi-meta">已平仓 <b id="kpi-trades">0</b> 笔 · 盈利 <b class="pos" id="kpi-wins">0</b> 笔</span>
           </div>
           <div class="kpi">
-            <span class="eyebrow">最大回撤 · 90 日</span>
-            <b class="kpi-v num" id="kpi-dd">2.8<i class="unit">%</i></b>
-            <span class="kpi-meta">发生于 10-04 · 单日恢复</span>
+            <span class="eyebrow">最大回撤</span>
+            <b class="kpi-v num" id="kpi-dd">0.0<i class="unit">%</i></b>
+            <span class="kpi-meta">基于真实权益曲线 · <span id="kpi-dd-at">—</span></span>
           </div>
         </div>
 
@@ -756,7 +756,7 @@
 
           <section class="admin-view" data-admin-view="events" hidden>
             <div class="admin-bar">
-              <p class="admin-lede">当前扫描面。示例目录在 Polymarket 不可达时启用；实时目录来自 Gamma / CLOB。</p>
+              <p class="admin-lede">当前扫描面来自 Polymarket Gamma 实时目录；PM 不可达时扫描面为空，不会生成模拟盘口。</p>
               <div class="admin-bar-actions">
                 <input id="event-search" class="admin-input" type="search" placeholder="搜索事件、标的或来源">
                 <button class="admin-btn" id="refresh-catalog">重建目录</button>

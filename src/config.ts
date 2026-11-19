@@ -1,4 +1,4 @@
-﻿import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -62,9 +62,11 @@ export interface AppConfig {
     rpcUrl: string;
   };
   alertWebhookUrl: string;
+  /** Deterministic demo fixture for tests only; never used by the production start path. */
+  seedTestFixture: boolean;
 }
 
-const mode = (process.env.MARKET_DATA_MODE ?? "auto").toLowerCase();
+const mode = (process.env.MARKET_DATA_MODE ?? "live").toLowerCase();
 
 export const config: AppConfig = {
   root: ROOT,
@@ -72,7 +74,7 @@ export const config: AppConfig = {
   host: process.env.HOST ?? "127.0.0.1",
   dbPath: resolve(ROOT, process.env.DB_PATH ?? "data/convergence.db"),
   sessionTtlMs: num(process.env.SESSION_TTL_HOURS, 168) * 3_600_000,
-  marketDataMode: (["auto", "live", "demo"].includes(mode) ? mode : "auto") as MarketDataMode,
+  marketDataMode: (["auto", "live", "demo"].includes(mode) ? mode : "live") as MarketDataMode,
   tradingMode: (process.env.TRADING_MODE === "live" ? "live" : "paper") as TradingMode,
   liveAck: process.env.LIVE_TRADING_ACK ?? "",
   cookieSecure: bool(process.env.COOKIE_SECURE, false),
@@ -96,7 +98,8 @@ export const config: AppConfig = {
     chainId: num(process.env.PM_CHAIN_ID, 137),
     rpcUrl: process.env.PM_RPC_URL ?? "https://polygon-rpc.com"
   },
-  alertWebhookUrl: process.env.ALERT_WEBHOOK_URL ?? ""
+  alertWebhookUrl: process.env.ALERT_WEBHOOK_URL ?? "",
+  seedTestFixture: bool(process.env.SEED_TEST_FIXTURE, false)
 };
 
 export interface LiveConfigStatus {

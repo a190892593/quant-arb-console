@@ -49,15 +49,15 @@ test("book: aggregates cost, target and pnl from the same ledger", () => {
       event({ id: "e2", und: "ETH", ask: 0.2, bid: 0.19, fair: 0.24, delta: -0.1 })
     ],
     positions: [
-      { evId: "e1", qty: 100_000, avg: 0.38, hedgeUsd: 20_000, hedgeEntry: 66_000 },
-      { evId: "e2", qty: 50_000, avg: 0.18, hedgeUsd: 5_000, hedgeEntry: 1_700 }
+      { evId: "e1", qty: 100_000, avg: 0.38, hedgeUsd: 20_000, hedgeEntry: 66_000, hedgeSide: "short" },
+      { evId: "e2", qty: 50_000, avg: 0.18, hedgeUsd: 5_000, hedgeEntry: 1_700, hedgeSide: "long" }
     ]
   };
   const b = book(ctx);
   assert.equal(b.rows.length, 2);
   assert.ok(b.cost > 0);
   assert.ok(b.pnl > 0);
-  assert.equal(b.netDelta, Math.max(0, b.target - b.hedge));
+  assert.ok(Math.abs(b.netDelta) < 1, String(b.netDelta));
   assert.ok(b.byUnd.BTC.face > 0 && b.byUnd.ETH.face > 0);
 });
 
@@ -76,9 +76,10 @@ test("touchFair prices a reach market above the terminal digital price", () => {
   assert.ok(touch > 0.25 && touch < 0.45, String(touch));
 });
 
-test("hedgeDelta keeps the direction sign and stays within the sizing band", () => {
+test("hedgeDelta returns the true perp/face multiplier and its sign", () => {
   const up = hedgeDelta({ spot: 100, strike: 105, vol: 0.6, days: 30, direction: 1 });
   const down = hedgeDelta({ spot: 100, strike: 105, vol: 0.6, days: 30, direction: -1 });
   assert.ok(up > 0 && down < 0);
-  assert.ok(Math.abs(up) >= 0.005 && Math.abs(up) <= 0.6);
+  assert.ok(up > 0.5 && up <= 10, String(up));
+  assert.ok(Math.abs(up + down) < 1e-9);
 });

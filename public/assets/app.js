@@ -401,8 +401,8 @@ import { CONV as D, api, download } from "./store.js";
             "</div>" +
             '<div class="plan-leg">' +
               '<div class="plan-src"><b>HYPERLIQUID</b><span>对冲腿</span></div>' +
-              '<div class="plan-mid"><b>做空 ' + esc(d.und) + "-PERP · 约 " + usd(qty * Math.abs(d.delta), 0) + "</b><span>" + esc(d.und) + " " +
-                usd(D.market[d.und].px, 2) + " · Delta " + (d.delta * 100).toFixed(1) + "%</span></div>" +
+              '<div class="plan-mid"><b>' + (d.delta >= 0 ? "做空" : "做多") + " " + esc(d.und) + "-PERP · 约 " + usd(qty * Math.abs(d.delta), 0) + "</b><span>" + esc(d.und) + " " +
+                usd(D.market[d.und].px, 2) + " · 真实 Delta " + d.delta.toFixed(2) + "x 面值</span></div>" +
               '<div class="plan-num"><b>' + usd(qty * Math.abs(d.delta) * D.COST.hlFeeBps / 10000, 2) + "</b><span>手续费</span></div>" +
             "</div>" +
           "</div>" +
@@ -421,7 +421,7 @@ import { CONV as D, api, download } from "./store.js";
       '<div class="drawer-f">' +
         '<div class="df-sum"><span>预计净边捕获 · ' + qty.toLocaleString("en-US") + " 股</span><b" +
           (planProfit < 0 ? ' class="neg"' : "") + ">" + signedUsd(planProfit, 0) + "</b></div>" +
-        '<button class="btn btn-ghost btn-sm" id="simulate-btn">模拟</button>' +
+        '<button class="btn btn-ghost btn-sm" id="simulate-btn">试算</button>' +
         '<button class="btn btn-primary" id="execute-btn"' + (canExecute ? "" : " disabled") + ">" +
           (app.kill ? "熔断中" : d.net <= 0 ? "净边为负" : settleBlocked ? "结算冻结" : "执行套利") + "</button>" +
       "</div>";
@@ -435,7 +435,7 @@ import { CONV as D, api, download } from "./store.js";
     const close = () => closeDrawer(prevFocus);
     $("#drawer .x-btn").addEventListener("click", close);
     $("#simulate-btn").addEventListener("click", () => {
-      toast("模拟完成", "两条腿按当前盘口可成交 " + qty.toLocaleString("en-US") + " 股，预计滑点 5.8bps，净边捕获 " + signedUsd(planProfit, 0) + "。");
+      toast("试算完成", "两条腿按当前盘口可成交 " + qty.toLocaleString("en-US") + " 股，预计滑点 5.8bps，净边捕获 " + signedUsd(planProfit, 0) + "。");
     });
     $("#execute-btn").addEventListener("click", () => {
       if (!guard()) return;
@@ -576,7 +576,7 @@ import { CONV as D, api, download } from "./store.js";
       btn.querySelector(".dot").className = "dot " + (ok ? "ok" : status.state === "disabled" ? "" : status.state === "down" ? "bad" : "warn");
       btn.querySelector("b").textContent = ok
         ? (status.latencyMs != null ? status.latencyMs + "ms" : "在线")
-        : status.mode === "demo" ? "DEMO" : status.state === "disabled" ? "OFF" : "DOWN";
+        : status.mode === "offline" ? "OFF" : status.mode === "demo" ? "TEST" : status.state === "disabled" ? "OFF" : "DOWN";
       btn.title = status.label + " · " + status.message;
     };
     const pm = D.venues.find(v => v.id === "polymarket");
@@ -589,7 +589,7 @@ import { CONV as D, api, download } from "./store.js";
         note.textContent = "实时行情 · PM 已接入 · HL 已接入 · " + (D.engine.tradingMode === "live" ? "实盘执行" : "纸面撮合");
       } else {
         const hlOk = hl?.state === "ok";
-        note.textContent = (hlOk ? "HL 实时行情" : "HL 不可达") + " · PM 示例盘口 · " + (D.engine.tradingMode === "live" ? "实盘执行" : "纸面撮合");
+        note.textContent = (hlOk ? "HL 实时行情" : "HL 不可达") + " · PM 离线 · 扫描暂停 · " + (D.engine.tradingMode === "live" ? "实盘执行" : "纸面撮合");
       }
       if (D.engine.liveBlockedReason) note.textContent += " · 实盘未启用";
       note.title = [pm?.message, hl?.message, D.engine.liveBlockedReason].filter(Boolean).join("\n");
@@ -834,29 +834,31 @@ import { CONV as D, api, download } from "./store.js";
     const active = rows.filter(r => r.status === "active").length;
     const netEdges = rows.filter(r => r.net >= D.MIN_EDGE_CENTS).map(r => r.net).sort((a, z) => a - z);
     const median = netEdges.length ? netEdges[Math.floor(netEdges.length / 2)] : 0;
-    const series = D.equity;
+    const series = D.equity.length ? D.equity : [{ t: D.now(), v: D.equityNow }];
     const last = series[series.length - 1].v;
-    const r30 = last / series[series.length - 31].v - 1;
-    const r12 = last / series[0].v - 1;
+    const r30 = last / (series[Math.max(0, series.length - 31)].v || last) - 1;
+    const r12 = last / (series[0].v || last) - 1;
     let peak90 = 0, dd90 = 0;
     series.slice(-90).forEach(d => { peak90 = Math.max(peak90, d.v); dd90 = Math.min(dd90, d.v / peak90 - 1); });
 
     $("#today-line").textContent = "OVERVIEW · " + (currentAcct() ? acctCode(app.accountId) + " " + currentAcct().name + " · " : "") + dateStr() + " " + weekday();
     $("#hero-equity").textContent = usd(D.equityNow, 2);
     $("#rail-equity").textContent = usd(D.equityNow, 2);
-    $("#hero-30d").textContent = signedPct(r30, 2);
-    $("#hero-12m").textContent = signedPct(r12, 1);
+    $("#hero-30d").textContent = series.length > 1 ? signedPct(r30, 2) : "—";
+    $("#hero-12m").textContent = series.length > 1 ? signedPct(r12, 1) : "—";
     $("#hero-30d").className = r30 >= 0 ? "pos" : "neg";
     $("#hero-12m").className = r12 >= 0 ? "pos" : "neg";
-    const prevDay = series.length > 1 ? series[series.length - 2].v : D.equityNow;
-    const todayPnl = D.equityNow - prevDay;
+    const dayStart = new Date();
+    dayStart.setHours(0, 0, 0, 0);
+    const dayBase = series.filter(p => p.t >= dayStart.getTime())[0] ?? series[0] ?? { v: D.equityNow };
+    const todayPnl = D.equityNow - dayBase.v;
     const todayEl = $("#hero-today");
     if (todayEl) {
       todayEl.textContent = signedUsd(todayPnl, 2);
       todayEl.className = "delta " + (todayPnl >= 0 ? "up" : "down");
     }
     const todayPctEl = $("#hero-today-pct");
-    if (todayPctEl) todayPctEl.textContent = "今日 " + signedPct(prevDay > 0 ? todayPnl / prevDay : 0, 2);
+    if (todayPctEl) todayPctEl.textContent = "今日 " + signedPct(dayBase.v > 0 ? todayPnl / dayBase.v : 0, 2);
     const todayPnlEl = $("#hero-today-pnl");
     if (todayPnlEl) {
       todayPnlEl.textContent = signedUsd(todayPnl, 2);
@@ -888,12 +890,19 @@ import { CONV as D, api, download } from "./store.js";
       $("#attr-total-bar").className = totalPnl >= 0 ? "pos" : "neg";
     }
     $("#kpi-dd").innerHTML = "−" + Math.abs(dd90 * 100).toFixed(1) + '<i class="unit">%</i>';
+    const realized = D.account.realizedPnl ?? 0;
+    $("#kpi-realized").textContent = signedUsd(realized, 0);
+    $("#kpi-realized").className = "kpi-v num " + (realized >= 0 ? "pos" : "neg");
+    $("#kpi-trades").textContent = D.account.closedTrades ?? 0;
+    $("#kpi-wins").textContent = D.account.wins ?? 0;
+    $("#kpi-dd-at").textContent = D.equity.length > 1 ? dateShort(D.equity[0].t) + " 起" : "自起始";
     $("#kpi-opps").textContent = signals;
     $("#kpi-ready").textContent = ready;
     $("#kpi-active").textContent = active;
-    $("#kpi-delta").textContent = usd(b.netDelta, 0);
+    $("#kpi-delta").textContent = signedUsd(b.netDelta, 0);
+    $("#kpi-delta").className = "kpi-v num " + (Math.abs(b.netDelta) > (limitMap().delta.value) * 0.8 ? "warn" : "");
     const dl = limitMap().delta;
-    $("#kpi-delta-meta").textContent = "限额 " + usd(dl.value, 0) + " · 占用 " + pct(b.netDelta / dl.value);
+    $("#kpi-delta-meta").textContent = "限额 " + usd(dl.value, 0) + " · 占用 " + pct(Math.abs(b.netDelta) / dl.value);
     $("#kpi-median").innerHTML = median.toFixed(1) + '<i class="unit">¢</i>';
     const medOf = arr => {
       const s = arr.slice().sort((x, y) => x - y);
@@ -904,8 +913,8 @@ import { CONV as D, api, download } from "./store.js";
     $("#kpi-cost").textContent = medOf(activeRows.map(r => r.costBps / 100)).toFixed(1) + "¢";
 
     const unhedged = b.netDelta;
-    $("#hero-unhedged").textContent = usd(unhedged, 0);
-    $("#hero-unhedged").className = "num " + (unhedged > 40000 ? "warn" : "");
+    $("#hero-unhedged").textContent = signedUsd(unhedged, 0);
+    $("#hero-unhedged").className = "num " + (Math.abs(unhedged) > 40000 ? "warn" : "");
     $("#hero-pnl").textContent = signedUsd(b.pnl, 0);
     const util = (b.cost + b.margin) / D.equityNow;
     $("#hero-util").textContent = pct(util);
@@ -986,7 +995,7 @@ import { CONV as D, api, download } from "./store.js";
       let used = 0;
       if (l.id === "pm") used = b.cost;
       if (l.id === "hl") used = b.margin;
-      if (l.id === "delta") used = b.netDelta;
+      if (l.id === "delta") used = Math.abs(b.netDelta);
       if (l.id === "settle") used = b.settle7;
       if (l.id === "conc") used = b.maxCost / D.equityNow * 100;
       map[l.id] = { ...l, used };
@@ -995,7 +1004,9 @@ import { CONV as D, api, download } from "./store.js";
   }
 
   function sparkSVG() {
-    const pts = D.equity.slice(-30);
+    let pts = D.equity.slice(-30);
+    if (!pts.length) pts = [{ t: D.now(), v: D.equityNow }];
+    if (pts.length === 1) pts = [pts[0], { ...pts[0] }];
     const w = 220, h = 76, p = 3;
     const vals = pts.map(d => d.v);
     const min = Math.min(...vals), max = Math.max(...vals);
@@ -1024,7 +1035,9 @@ import { CONV as D, api, download } from "./store.js";
     const height = 268;
     const pad = { l: 6, r: 54, t: 14, b: 24 };
     const n = app.range;
-    const data = D.equity.slice(-(n + 1));
+    let data = D.equity.slice(-(n + 1));
+    if (!data.length) data = [{ t: D.now(), v: D.equityNow }];
+    if (data.length === 1) data = [data[0], { ...data[0], t: data[0].t + 86400000 }];
     const vals = data.map(d => d.v);
     let min = Math.min(...vals), max = Math.max(...vals);
     const span0 = max - min || 1;
@@ -1099,15 +1112,15 @@ import { CONV as D, api, download } from "./store.js";
     const ret = vals[vals.length - 1] / vals[0] - 1;
     const rets = [];
     for (let i = 1; i < vals.length; i++) rets.push(vals[i] / vals[i - 1] - 1);
-    const mean = rets.reduce((s, v) => s + v, 0) / rets.length;
-    const sd = Math.sqrt(rets.reduce((s, v) => s + (v - mean) ** 2, 0) / rets.length) || 0.0001;
+    const mean = rets.length ? rets.reduce((s, v) => s + v, 0) / rets.length : 0;
+    const sd = rets.length ? Math.sqrt(rets.reduce((s, v) => s + (v - mean) ** 2, 0) / rets.length) || 0.0001 : 0;
     let peak = vals[0], dd = 0;
     vals.forEach(v => { peak = Math.max(peak, v); dd = Math.min(dd, v / peak - 1); });
     $("#eq-ret").textContent = signedPct(ret, 2);
     $("#eq-ret").className = "num " + (ret >= 0 ? "pos" : "neg");
-    $("#eq-sharpe").textContent = (mean / sd * Math.sqrt(365)).toFixed(2);
+    $("#eq-sharpe").textContent = rets.length > 1 ? (mean / sd * Math.sqrt(365)).toFixed(2) : "—";
     $("#eq-dd").textContent = "−" + Math.abs(dd * 100).toFixed(2) + "%";
-    $("#eq-trades").textContent = Math.round(n * 6.13);
+    $("#eq-trades").textContent = D.account.closedTrades ?? 0;
   }
 
   /* ---------------- scanner ---------------- */
@@ -1155,7 +1168,7 @@ import { CONV as D, api, download } from "./store.js";
           '<span class="edge-mini"><i data-f="bar"' + (d.net < -0.005 ? ' class="neg"' : "") + ' style="width:' + d.edgeWidth + '%"></i></span>' +
           '<small data-f="bps">' + bps(d.netBps) + " bps</small></div></td>" +
         '<td class="num-col size-cell"><b>' + compactUsd(d.depth) + "</b><small>盘口 " + Math.round(d.depth / Math.max(1, d.ask * 1e3)) + "k 股</small></td>" +
-        '<td class="num-col"><div class="hedge-cell">' + compactUsd(d.hedgeUsd) + "<small>Delta " + (d.delta * 100).toFixed(1) + "%</small></div></td>" +
+        '<td class="num-col"><div class="hedge-cell">' + compactUsd(d.hedgeUsd) + "<small>" + (d.delta >= 0 ? "做空" : "做多") + " · " + Math.abs(d.delta).toFixed(2) + "x</small></div></td>" +
         '<td class="num-col"><div class="conf"><span class="conf-num">' + d.conf + '</span><span class="conf-bar"><i class="' + (d.conf >= 80 ? "hi" : d.conf >= 65 ? "" : "lo") + '" style="width:' + d.conf + '%"></i></span></div></td>' +
         '<td class="num-col"><div class="due-cell' + (d.days <= 7 ? " is-soon" : "") + '">' + dateShort(Date.parse(d.due)) + "<small>" + daysText(d.days) + "</small></div></td>" +
         '<td data-f="status">' + statusChip(d) + "</td>" +
@@ -1263,7 +1276,7 @@ import { CONV as D, api, download } from "./store.js";
     const fmtQty = n => unit + Math.round(n).toLocaleString("en-US");
     return '<div class="leg ' + cls + '">' +
       '<div class="leg-h"><span class="venue"><span class="dot ' + (pctFill > 0 ? "ok" : "") + '"></span>' + leg.venue + "</span>" +
-      '<span class="leg-side ' + leg.side + '">' + (leg.side === "buy" ? "买入" : "做空") + "</span></div>" +
+      '<span class="leg-side ' + leg.side + '">' + (leg.side === "buy" ? "买入" : leg.side === "long" ? "做多" : "做空") + "</span></div>" +
       '<div class="leg-bar"><i style="width:' + pctFill + '%"></i></div>' +
       '<div class="leg-stats"><span>' + fmtQty(leg.filled) + " / " + fmtQty(leg.qty) + "</span>" +
         "<b>" + (leg.price ? (leg.venue === "POLYMARKET" ? cents(leg.price) : usd(leg.price, 1)) : "—") + "</b></div>" +
@@ -1388,8 +1401,9 @@ import { CONV as D, api, download } from "./store.js";
     const rows = app.posFilter === "warn" ? b.rows.filter(r => r.ratio < 0.9) : b.rows;
 
     $("#pos-face").textContent = usd(b.face, 0);
-    $("#pos-delta").textContent = usd(b.netDelta, 0);
-    $("#pos-delta-pct").textContent = pct(b.netDelta / D.equityNow, 2);
+    $("#pos-delta").textContent = signedUsd(b.netDelta, 0);
+    $("#pos-delta").className = "kpi-v num " + (Math.abs(b.netDelta) > (app.limits.find(l => l.id === "delta")?.value || 1) * 0.8 ? "warn" : "");
+    $("#pos-delta-pct").textContent = signedPct(b.netDelta / D.equityNow, 2) + " · " + (b.netDelta >= 0 ? "多向" : "空向");
     const deltaLimit = app.limits.find(l => l.id === "delta");
     if (deltaLimit) $("#pos-delta-limit").textContent = usd(deltaLimit.value, 0);
     $("#pos-margin").textContent = usd(b.margin, 0);
@@ -1410,7 +1424,7 @@ import { CONV as D, api, download } from "./store.js";
     }
     $("#pos-pnl").className = "kpi-v num " + (b.pnl >= 0 ? "pos" : "neg");
     $("#hero-pnl").textContent = signedUsd(b.pnl, 0);
-    $("#hero-unhedged").textContent = usd(b.netDelta, 0);
+    $("#hero-unhedged").textContent = signedUsd(b.netDelta, 0);
     $("#hero-util").textContent = pct((b.cost + b.margin) / D.equityNow);
 
     // distribution by underlying
@@ -1448,7 +1462,7 @@ import { CONV as D, api, download } from "./store.js";
           '<td><div class="pos-title"><span class="ev-title">' + esc(r.ev.title) + "</span></div>" +
             '<div class="pos-sub"><span class="chip">' + esc(r.ev.und) + "</span><span>" + esc(r.ev.cat) + "</span></div></td>" +
           '<td class="num-col"><div class="hedge-cell">' + Math.round(r.qty).toLocaleString("en-US") + " 股<small>" + cents(r.avg) + " → " + cents(r.mark) + "</small></div></td>" +
-          '<td class="num-col"><div class="hedge-cell">' + usd(r.hedgeUsd, 0) + "<small>" + esc(r.ev.und) + " @ " + usd(r.hedgeEntry, 1) + "</small></div></td>" +
+          '<td class="num-col"><div class="hedge-cell">' + usd(r.hedgeUsd, 0) + "<small>" + (r.hedgeSide === "long" ? "做多" : "做空") + " " + esc(r.ev.und) + " @ " + usd(r.hedgeEntry, 1) + "</small></div></td>" +
           '<td class="num-col"><span class="ratio ' + ratioCls + '"><span class="ratio-bar"><i style="width:' + clamp(r.ratio * 100, 0, 100) + '%"></i></span><b>' + (r.ratio * 100).toFixed(0) + "%</b></span></td>" +
           '<td class="num-col"><div class="hedge-cell">' + (r.deltaUsd >= 0 ? "" : "−") + usd(Math.abs(r.deltaUsd), 0) + "<small>" + (r.deltaUsd > 0 ? "多向敞口" : "空向敞口") + "</small></div></td>" +
           '<td class="num-col"><div class="hedge-cell ' + (r.pnl >= 0 ? "pos" : "neg") + '">' + signedUsd(r.pnl, 0) + "<small>合约 " + signedUsd(r.contractPnl, 0) + "</small></div></td>" +
@@ -1464,7 +1478,7 @@ import { CONV as D, api, download } from "./store.js";
               "<div><span>成本</span><b>" + usd(r.cost, 2) + "</b></div>" +
               "<div><span>未实现</span><b class=\"" + (r.contractPnl >= 0 ? "pos" : "neg") + "\">" + signedUsd(r.contractPnl, 2) + "</b></div>" +
             "</div></div>" +
-            '<div class="legd-box"><div class="legd-h">对冲腿 · HYPERLIQUID <span>' + esc(r.ev.und) + "-PERP</span></div><div class=\"legd-rows\">" +
+            '<div class="legd-box"><div class="legd-h">对冲腿 · HYPERLIQUID <span>' + (r.hedgeSide === "long" ? "做多" : "做空") + " " + esc(r.ev.und) + "-PERP</span></div><div class=\"legd-rows\">" +
               "<div><span>规模 / 目标</span><b>" + usd(r.hedgeUsd, 0) + " / " + usd(r.target, 0) + "</b></div>" +
               "<div><span>入场 / 标记</span><b>" + usd(r.hedgeEntry, 2) + " / " + usd(r.mk.px, 2) + "</b></div>" +
               "<div><span>保证金</span><b>" + usd(r.hedgeUsd / 4.8, 0) + "</b></div>" +
@@ -2077,7 +2091,7 @@ import { CONV as D, api, download } from "./store.js";
           ready.map(d => '<option value="' + d.id + '">' + esc(d.title) + " · 净边 " + signedCents(d.net) + "</option>").join("") +
           '</select></div>' +
         '<div class="field"><label>合约腿成本（USDC）</label><input type="number" id="np-size" value="25000" min="1000" step="1000">' +
-          '<span class="hint">对冲腿按事件 Delta 自动计算</span></div>' +
+          '<span class="hint">对冲腿按真实二元期权 Delta（面值倍数）自动计算</span></div>' +
         '<div class="kvbox" id="np-preview"></div>',
       actions: [
         { label: "取消", kind: "btn-ghost" },

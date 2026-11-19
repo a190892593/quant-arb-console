@@ -110,8 +110,10 @@ function renderHeader() {
   if (avatar) avatar.textContent = (S.me.name || "A").slice(0, 1).toUpperCase();
   const pill = $("#env-pill");
   if (pill) {
-    const mode = S.status?.catalogMode === "live" ? "实时目录" : "示例目录";
-    pill.innerHTML = '<span class="dot ' + (S.status?.catalogMode === "live" ? "ok" : "warn") + '"></span>' + mode + " · " + (S.status?.tradingMode === "live" ? "实盘" : "纸面");
+    const live = S.status?.catalogMode === "live";
+    const offline = S.status?.catalogMode === "offline";
+    const mode = live ? "实时目录" : offline ? "PM 离线" : "测试目录";
+    pill.innerHTML = '<span class="dot ' + (live ? "ok" : offline ? "bad" : "warn") + '"></span>' + mode + " · " + (S.status?.tradingMode === "live" ? "实盘" : "纸面");
   }
   const title = $("#admin-title");
   if (title) title.textContent = "管理 · " + (titles[S.view] || "概览");
@@ -125,7 +127,7 @@ function renderOverview() {
   const running = S.accounts.filter(a => a.enabled && !a.kill).length;
   const autoOn = S.accounts.filter(a => a.enabled && !a.kill && a.auto).length;
   const kpis = [
-    { label: "引擎", value: live ? "LIVE" : "DEMO", sub: "目录 " + st.catalogMode + " · " + (st.tradingMode === "live" ? "实盘执行" : "纸面撮合"), cls: live ? "is-ok" : "is-warn" },
+    { label: "引擎", value: live ? "LIVE" : st.catalogMode === "offline" ? "OFFLINE" : "TEST", sub: "目录 " + st.catalogMode + " · " + (st.tradingMode === "live" ? "实盘执行" : "纸面撮合"), cls: live ? "is-ok" : "is-warn" },
     { label: "扫描面", value: String(st.counts.events), sub: "扫描序号 #" + Number(st.scanSeq || 0).toLocaleString("en-US"), cls: "" },
     { label: "独立账户", value: String(S.accounts.length), sub: running + " 运行 · " + (S.accounts.length - running) + " 熔断或停用", cls: running === S.accounts.length ? "is-ok" : "is-warn" },
     { label: "场所", value: venuesOk ? "OK" : "DEGRADED", sub: st.venues.map(v => v.label.split(" ")[0] + " " + v.state).join(" · "), cls: venuesOk ? "is-ok" : "is-warn" }
@@ -276,7 +278,6 @@ function renderStrategy() {
 
   $("#settings-fields").innerHTML =
     '<div class="admin-field" style="grid-column:1/-1">' +
-      toggle("allowDemoFallback", "允许示例目录回退", "Polymarket 不可达时使用按 HL 实时价格生成的示例盘口。", s.allowDemoFallback) +
       toggle("liveTradingEnabled", "启用实盘执行", canLive ? "已具备凭据与确认短语，打开后真实订单将发往交易所。" : "凭据或 LIVE_TRADING_ACK 未就绪，无法启用。", s.liveTradingEnabled, !canLive) +
     "</div>" +
     field("scanIntervalMs", "扫描间隔（ms）", s.scanIntervalMs, "100", "500–60000，全局生效") +
@@ -530,10 +531,10 @@ async function handleAccountAction(e) {
     if (edit) {
       openModal({
         title: "调整 " + account.name,
-        body: '<div class="admin-field"><span>账户净值（USDC）</span><input id="ae-equity" type="number" value="' + account.equity + '"></div>' +
+        body: '<div class="admin-field"><span>初始净值（USDC）</span><input id="ae-equity" type="number" value="' + (account.startingEquity ?? account.equity) + '"></div>' +
           '<div class="admin-field"><span>最小净边（¢）</span><input id="ae-edge" type="number" step="0.1" value="' + account.minEdge + '"></div>' +
           '<div class="admin-field"><span>纸面成交延迟（ms）</span><input id="ae-fill" type="number" step="100" value="' + account.paperFillMs + '"></div>' +
-          '<p class="admin-p">净值不能低于该账户已部署资金的 98%。所有修改立即生效并写入审计。</p>',
+          '<p class="admin-p">已实现盈亏独立累计；初始净值不能低于该账户已部署资金的 98%。所有修改立即生效并写入审计。</p>',
         actions: [
           { label: "取消" },
           { label: "保存", kind: "primary", onClick: async () => {
@@ -630,7 +631,6 @@ $("#save-settings").addEventListener("click", async () => {
   const toggle = name => form.querySelector('[data-setting-toggle="' + name + '"]')?.getAttribute("aria-checked") === "true";
   try {
     await api("PUT", "/api/admin/settings", {
-      allowDemoFallback: toggle("allowDemoFallback"),
       liveTradingEnabled: toggle("liveTradingEnabled"),
       scanIntervalMs: Math.round(val("scanIntervalMs")),
       cost: {
@@ -733,14 +733,14 @@ $("#export-json").addEventListener("click", async () => {
 $("#reset-data").addEventListener("click", () => {
   openModal({
     title: "重置交易账本？",
-    body: '<p class="admin-p">将清空持仓、订单、待接管、审计、事件与净值曲线，并按当前行情重建演示账本。用户、限额与规则保留。</p>' +
+    body: '<p class="admin-p">将清空持仓、订单、待接管、审计与净值曲线，四个账户回到起始资金，并重新拉取实时目录。用户、限额与规则保留。</p>' +
       '<div class="admin-field"><span>输入 RESET 确认</span><input id="reset-confirm" placeholder="RESET"></div>',
     actions: [
       { label: "取消" },
       { label: "确认重置", kind: "danger", onClick: async () => {
           if ($("#reset-confirm").value !== "RESET") { toast("确认短语不正确", "warn"); return false; }
           await api("POST", "/api/admin/data/reset", { confirm: "RESET" });
-          toast("演示账本已重建");
+          toast("纸面账本已重置");
           await loadAll();
         } }
     ]

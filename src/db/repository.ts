@@ -480,6 +480,15 @@ export class Repository {
       for (const r of rows) stmt.run(accountId, r.t, r.v);
     });
   }
+  equityAppend(accountId: AccountId, point: EquityPoint): void {
+    this.run("INSERT OR REPLACE INTO equity(account_id,t,v) VALUES(?,?,?)", accountId, point.t, point.v);
+  }
+  equityTrim(accountId: AccountId, keep = 5000): void {
+    this.run(
+      "DELETE FROM equity WHERE account_id=? AND t NOT IN (SELECT t FROM equity WHERE account_id=? ORDER BY t DESC LIMIT ?)",
+      accountId, accountId, keep
+    );
+  }
   calendarAll(accountId: AccountId): CalendarItem[] {
     return this.all<CalendarRow>("SELECT ev_id,exposure,note FROM calendar WHERE account_id=? ORDER BY sort", accountId)
       .map(r => ({ evId: r.ev_id, exposure: r.exposure, note: r.note ?? "" }));

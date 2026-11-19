@@ -1,5 +1,5 @@
 import { config } from "../config.js";
-import { digitalFair, hedgeDelta, clamp, touchFair } from "../domain/pricing.js";
+import { digitalFair, hedgeDelta, touchDelta, clamp, touchFair } from "../domain/pricing.js";
 import type { EventContract, Market, VenueStatus } from "../domain/types.js";
 
 const TIMEOUT = 9_000;
@@ -74,6 +74,12 @@ export interface PmCatalog {
   parsed: number;
 }
 
+interface GammaEvent {
+  id?: string;
+  title?: string;
+  markets?: GammaMarket[];
+}
+
 interface ParsedQuestion {
   coin: string;
   cat: string;
@@ -89,10 +95,13 @@ function parseQuestion(question: string): ParsedQuestion | null {
 
   const amount = "\\$?\\s*([\\d,]+(?:\\.\\d+)?)\\s*(k|m|thousand|million)?";
   const patterns: Array<{ re: RegExp; direction: 1 | -1; kind: "digital" | "touch" }> = [
+    // Intraday touch language must win over the generic above/below wording.
+    { re: new RegExp(`(?:trade below|dip below|drop below|fall below)\\s+${amount}`, "i"), direction: -1, kind: "touch" },
+    { re: new RegExp(`(?:reach|hit|exceed|touch|trade above|trade higher)\\s+${amount}`, "i"), direction: 1, kind: "touch" },
     { re: new RegExp(`(?:above|over|greater than|at least|≥|>)\\s+${amount}`, "i"), direction: 1, kind: "digital" },
     { re: new RegExp(`(?:below|under|less than|at most|≤|<)\\s+${amount}`, "i"), direction: -1, kind: "digital" },
-    { re: new RegExp(`(?:reach|hit|exceed|touch|trade above|close above)\\s+${amount}`, "i"), direction: 1, kind: "touch" },
-    { re: new RegExp(`(?:trade below|close below|drop below|fall below)\\s+${amount}`, "i"), direction: -1, kind: "digital" },
+    { re: new RegExp(`(?:close above|close higher than)\\s+${amount}`, "i"), direction: 1, kind: "digital" },
+    { re: new RegExp(`(?:close below|close lower than)\\s+${amount}`, "i"), direction: -1, kind: "digital" },
     { re: new RegExp(`${amount}\\s+(?:or higher|or above)`, "i"), direction: 1, kind: "digital" },
     { re: new RegExp(`${amount}\\s+(?:or lower|or below)`, "i"), direction: -1, kind: "digital" }
   ];
@@ -117,25 +126,35 @@ function parseJsonArray(text: string | undefined): string[] {
   } catch { return []; }
 }
 
-/** Build the live scanner universe from Polymarket Gamma markets. */
+/**
+ * Build the live scanner universe from Polymarket Gamma.
+ *
+ * The generic /markets feed is dominated by sports and politics; price-threshold crypto
+ * markets live under the crypto tag. Fetch those events, flatten their markets, and only
+ * keep quotes that Gamma actually reports (both bid and ask), so nothing is synthesised.
+ */
 export async function fetchCatalog(market: Market, vols: Record<string, number>): Promise<PmCatalog> {
   const PAGE = 100;
-  const MAX_PAGES = 6;
+  const MAX_PAGES = 5;
   const list: GammaMarket[] = [];
   for (let page = 0; page < MAX_PAGES; page++) {
-    const url = `${config.pm.gammaUrl}/markets?active=true&closed=false&limit=${PAGE}&offset=${page * PAGE}&order=volume24hr&ascending=false`;
-    const raw = await getJson<GammaMarket[] | { data?: GammaMarket[] }>(url);
+    const url = `${config.pm.gammaUrl}/events?tag_slug=crypto&active=true&closed=false&limit=${PAGE}&offset=${page * PAGE}&order=volume24hr&ascending=false`;
+    const raw = await getJson<GammaEvent[] | { data?: GammaEvent[] }>(url);
     const batch = Array.isArray(raw) ? raw : (raw.data ?? []);
-    list.push(...batch);
+    for (const ev of batch) {
+      for (const m of ev.markets ?? []) list.push(m);
+    }
     if (batch.length < PAGE) break;
   }
+
   const events: EventContract[] = [];
   const seen = new Set<string>();
   let parsed = 0;
 
   for (const m of list) {
-    if (!m.question || m.closed || m.archived) continue;
-    if (seen.has(m.conditionId ?? m.id ?? "")) continue;
+    if (!m.question || m.closed || m.archived || m.active === false) continue;
+    const key = m.conditionId ?? m.id ?? "";
+    if (!key || seen.has(key)) continue;
     const p = parseQuestion(m.question);
     if (!p) continue;
     parsed++;
@@ -145,38 +164,42 @@ export async function fetchCatalog(market: Market, vols: Record<string, number>)
     if (!Number.isFinite(dueMs) || dueMs <= Date.now() + 3600_000) continue;
     const days = (dueMs - Date.now()) / 86_400_000;
     if (days > 400 || days < 0.5) continue;
+
+    const outcomes = parseJsonArray(m.outcomes);
+    const yesIndex = outcomes.findIndex(o => /^yes$/i.test(o.trim()));
+    if (outcomes.length !== 2 || yesIndex < 0) continue;
+    const tokens = parseJsonArray(m.clobTokenIds);
+    const tokenId = tokens[yesIndex] ?? tokens[0];
+
+    const ask = Number(m.bestAsk);
+    const bid = Number(m.bestBid);
+    if (!(ask > 0 && ask < 1 && bid > 0 && bid < ask)) continue;
+    const depth = Math.max(Number(m.liquidityNum ?? m.liquidity ?? 0), 0);
+    if (depth < 2_000) continue;
+
     const vol = vols[p.coin] ?? 0.7;
     const fair = p.kind === "touch"
       ? touchFair({ spot, strike: p.strike, vol, days })
       : digitalFair({ spot, strike: p.strike, vol, days, direction: p.direction });
     if (fair == null) continue;
-    const tokens = parseJsonArray(m.clobTokenIds);
-    const outcomes = parseJsonArray(m.outcomes);
-    const yesIndex = outcomes.length ? Math.max(0, outcomes.findIndex(o => /^yes$/i.test(o.trim()))) : 0;
-    const tokenId = tokens[yesIndex] ?? tokens[0];
-    const ask = Number(m.bestAsk);
-    const bid = Number(m.bestBid);
-    if (!(ask > 0 && ask < 1)) continue;
-    const depth = Math.max(Number(m.liquidityNum ?? m.liquidity ?? 0), 0);
-    if (depth < 2_000) continue;
-    const spread = Math.max(0.002, Number(m.spread) || Math.max(0.002, ask - (bid > 0 ? bid : ask - 0.01)));
+
+    const spread = Math.max(0.001, ask - bid);
     const delta = hedgeDelta({ spot, strike: p.strike, vol, days, direction: p.direction });
     const conf = Math.round(clamp(58 + Math.log10(Math.max(1, depth / 1000)) * 6 - spread * 400, 45, 96));
-    const id = "pm-" + (m.conditionId ?? m.id ?? tokenId ?? Math.random().toString(36).slice(2));
-    seen.add(m.conditionId ?? id);
+    seen.add(key);
     events.push({
-      id,
+      id: "pm-" + key,
       title: m.question.trim(),
       cat: p.cat,
       und: p.coin,
       due: new Date(dueMs).toISOString(),
       ask: clamp(ask, 0.01, 0.99),
-      bid: clamp(bid > 0 ? bid : ask - spread, 0.01, 0.985),
+      bid: clamp(bid, 0.01, 0.985),
       fair,
       depth: Math.round(depth),
       conf,
       delta,
-      src: `${p.coin} 指数 · UMA`,
+      src: `${p.coin} · Polymarket`,
       source: "polymarket",
       model: { spot, strike: p.strike, vol, direction: p.direction, kind: p.kind },
       external: {

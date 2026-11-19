@@ -6,7 +6,7 @@ import type {
 } from "../domain/types.js";
 import { DEFAULT_LIMITS, DEFAULT_RULES } from "../domain/risk.js";
 import { ACCOUNT_DEFS, accountDef, eligibleFor, LATENCY_MAX_DAYS } from "../domain/accounts.js";
-import { accountsAll, getSettings, saveSettings } from "../settings.js";
+import { accountsAll, getSettings, saveAccounts, saveSettings } from "../settings.js";
 import { clock, dateShort, hhmm, mulberry32, simParts } from "../util.js";
 import { hashPassword } from "../auth.js";
 import type { MarketService } from "../market/service.js";
@@ -32,10 +32,10 @@ function scaledLimits(equity: number, accountId: AccountId): Limit[] {
   return DEFAULT_LIMITS.map(l => {
     if (l.kind === "pct") return { ...l };
     const ratio = l.id === "pm" ? 0.9
-      : l.id === "hl" ? 0.1
-      : l.id === "delta" ? 0.2
+      : l.id === "hl" ? 0.55
+      : l.id === "delta" ? 0.15
       : settleRatio;
-    return { ...l, value: Math.max(10_000, Math.round(equity * ratio / 1000) * 1000) };
+    return { ...l, value: Math.max(100, Math.round(equity * ratio / 100) * 100) };
   });
 }
 
@@ -54,29 +54,48 @@ export function ensureDefaults(repo: Repository): void {
   for (const acct of accounts) {
     if (repo.limitsAll(acct.id).length === 0) repo.limitsReplace(acct.id, scaledLimits(acct.equity, acct.id));
     if (repo.rulesAll(acct.id).length === 0) repo.rulesReplace(acct.id, DEFAULT_RULES);
-    if (repo.equityAll(acct.id).length === 0) seedEquity(repo, acct.id, acct.equity);
+    if (repo.equityAll(acct.id).length === 0) seedStartPoint(repo, acct.id, acct.equity);
   }
 }
 
-/** Each account gets its own 365-day curve, ending at its own equity. */
-export function seedEquity(repo: Repository, accountId: AccountId, equityNow: number, seed = 20_261_118): void {
-  const def = accountDef(accountId);
-  const rand = mulberry32(seed + def.short.charCodeAt(0) * 31);
-  const n = 365;
-  const raw: number[] = [1];
-  const vol = accountId === "latency" ? 0.0022 : accountId === "converge" ? 0.0038 : 0.0062;
-  const drift = accountId === "prob" ? 0.0009 : accountId === "converge" ? 0.0006 : accountId === "latency" ? 0.0005 : 0.0007;
-  for (let i = 1; i < n; i++) {
-    let r = drift + (rand() - 0.5) * vol;
-    if (i === 296 || i === 297 || i === 298) r -= vol * 1.4;
-    if (i === 214) r -= vol * 2;
-    raw.push(raw[i - 1]! * (1 + r));
+/** A real account starts with one honest point: its starting capital right now. */
+export function seedStartPoint(repo: Repository, accountId: AccountId, equityNow: number, t = Date.now()): void {
+  repo.equityReplace(accountId, [{ t, v: +equityNow.toFixed(2) }]);
+}
+
+/**
+ * One-time transition from the demo ledger to a live-only paper book:
+ * clear seeded trades/curves/events, reset every desk to 10,000 USDC,
+ * and rebuild limits/rules for that capital. Users and settings are preserved.
+ */
+export const STARTING_EQUITY = 10_000;
+
+export function resetLiveBaseline(repo: Repository): void {
+  repo.resetBusinessData();
+  repo.eventsReplace([], true);
+  const accounts = accountsAll(repo).map(a => ({
+    ...a,
+    equity: accountDef(a.id).defaultEquity,
+    realizedPnl: 0,
+    closedTrades: 0,
+    wins: 0,
+    enabled: true,
+    auto: true,
+    kill: false,
+    killReason: "",
+    lastKillAt: null
+  }));
+  saveAccounts(repo, accounts);
+  const now = Date.now();
+  for (const acct of accounts) {
+    const start = accountDef(acct.id).defaultEquity;
+    repo.limitsReplace(acct.id, scaledLimits(start, acct.id));
+    repo.rulesReplace(acct.id, DEFAULT_RULES);
+    repo.equityReplace(acct.id, [{ t: now, v: start }]);
   }
-  const factor = equityNow / raw[n - 1]!;
-  const p = simParts();
-  const end = Date.UTC(p.y, p.m - 1, p.d);
-  const points: EquityPoint[] = raw.map((v, i) => ({ t: end - (n - 1 - i) * DAY, v: v * factor }));
-  repo.equityReplace(accountId, points);
+  repo.metaSet("liveBaselineV1", "1");
+  repo.metaSet("liveBaselineV2", "1");
+  logger.info({ accounts: accounts.length, equity: accounts.map(a => a.equity) }, "baseline: rebuilt independent paper books");
 }
 
 function pickEvents(market: MarketService, repo: Repository, accountId: AccountId, limit: number): DerivedEvent[] {
@@ -148,13 +167,15 @@ export function seedTradingData(repo: Repository, market: MarketService): void {
       const budget = account.equity * share * (0.85 + rand() * 0.3);
       const qty = Math.max(100, Math.floor(budget / d.ask / 100) * 100);
       const mark = market.market[d.und]?.px ?? 1;
-      const hedge = qty * Math.abs(d.delta) * (0.9 + rand() * 0.1);
+      const hedgeSide: "long" | "short" = d.delta >= 0 ? "short" : "long";
+      const hedge = qty * Math.abs(d.delta);
       return {
         evId: d.id,
         qty,
         avg: +(Math.max(0.01, d.ask - (0.01 + rand() * 0.008))).toFixed(4),
         hedgeUsd: +hedge.toFixed(2),
-        hedgeEntry: +(mark * (1.008 + rand() * 0.03)).toFixed(4),
+        hedgeEntry: +(mark * (hedgeSide === "short" ? 1.008 + rand() * 0.03 : 1 - (0.008 + rand() * 0.03))).toFixed(4),
+        hedgeSide,
         accountId: account.id,
         openedAt: new Date(Date.now() - (1 + i * 2) * DAY).toISOString()
       };
@@ -174,6 +195,7 @@ export function seedTradingData(repo: Repository, market: MarketService): void {
       const spec = specs[i]!;
       const qty = Math.max(100, Math.floor((account.equity * 0.045) / d.ask / 100) * 100);
       const hedge = qty * Math.abs(d.delta);
+      const hedgeSide: "long" | "short" = d.delta >= 0 ? "short" : "long";
       const filled = Math.round(hedge * spec.fill);
       const order: Order = {
         id: `ORD-${orderNum--}`,
@@ -195,7 +217,7 @@ export function seedTradingData(repo: Repository, market: MarketService): void {
             price: d.ask, notional: +(qty * d.ask).toFixed(2), done: true
           },
           {
-            venue: "HYPERLIQUID", side: "short", label: `做空 ${d.und}-PERP`,
+            venue: "HYPERLIQUID", side: hedgeSide, label: `${hedgeSide === "short" ? "做空" : "做多"} ${d.und}-PERP`,
             qty: +hedge.toFixed(4), filled, price: market.market[d.und]?.px ?? 0,
             notional: +filled.toFixed(2), done: filled >= hedge - 0.01,
             note: filled < hedge ? `缺口 $${Math.round(hedge - filled).toLocaleString("en-US")} · 已排队补单` : undefined

@@ -1,12 +1,13 @@
 import { config, type MarketDataMode } from "../config.js";
 import type { Repository } from "../db/repository.js";
-import { digitalFair, hedgeDelta, clamp, touchFair } from "../domain/pricing.js";
+import { digitalFair, hedgeDelta, touchDelta, clamp, touchFair } from "../domain/pricing.js";
 import type { EventContract, Market, MarketTick, VenueStatus } from "../domain/types.js";
 import { DAY_MS } from "../util.js";
 import { generateDemoCatalog } from "./demo-catalog.js";
 import * as hl from "../venues/hyperliquid.js";
 import * as pm from "../venues/polymarket.js";
 import { logger } from "../logger.js";
+import { getSettings } from "../settings.js";
 
 const FALLBACK_MARKET: Market = {
   BTC: { px: 64_115, chg: 0.82 },
@@ -27,7 +28,7 @@ export class MarketService {
   vols: Record<string, number> = { ...DEFAULT_VOLS };
   hlStatus: VenueStatus;
   pmStatus: VenueStatus;
-  catalogMode: "live" | "demo" = "demo";
+  catalogMode: "live" | "demo" | "offline" = "offline";
   scanSeq = 48_219;
   lastScanAt = Date.now();
   lastCatalogAt = 0;
@@ -55,19 +56,15 @@ export class MarketService {
     await this.refreshHyperliquid();
     await this.refreshVols();
 
-    const persisted = this.repo.eventsAll(true);
-    if (persisted.length >= 12) {
-      this.events = persisted;
-      this.catalogMode = persisted.some(e => e.source === "polymarket") ? "live" : "demo";
-      this.pmStatus.mode = this.catalogMode;
-    } else {
+    if (config.seedTestFixture || this.mode === "demo") {
       await this.buildCatalog(true);
-    }
-
-    // If the operator explicitly asked for live data, try a catalog refresh in
-    // the background; an unreachable venue must never prevent the terminal from starting.
-    if (this.mode !== "demo" && this.catalogMode !== "live") {
-      void this.tryLiveCatalog();
+    } else {
+      this.events = this.repo.eventsAll(true).filter(e => e.source === "polymarket");
+      if (this.events.length) {
+        this.catalogMode = "live";
+        this.lastCatalogAt = Date.now();
+      }
+      await this.tryLiveCatalog();
     }
 
     this.updateModelSpots();
@@ -164,13 +161,20 @@ export class MarketService {
               direction: ev.model.direction
             });
         if (fair != null) ev.fair = +fair.toFixed(4);
-        ev.delta = hedgeDelta({
-          spot: ev.model.spot ?? this.market[ev.und]?.px ?? 0,
-          strike: ev.model.strike,
-          vol: ev.model.vol,
-          days,
-          direction: ev.model.direction
-        });
+        ev.delta = ev.model.kind === "touch"
+          ? touchDelta({
+              spot: ev.model.spot ?? this.market[ev.und]?.px ?? 0,
+              strike: ev.model.strike,
+              vol: ev.model.vol,
+              days
+            })
+          : hedgeDelta({
+              spot: ev.model.spot ?? this.market[ev.und]?.px ?? 0,
+              strike: ev.model.strike,
+              vol: ev.model.vol,
+              days,
+              direction: ev.model.direction
+            });
       }
     }
   }
@@ -211,11 +215,11 @@ export class MarketService {
       // Live PM quotes are a polling snapshot; we do not claim per-tick staleness for them.
       ev.quoteAgeMs = ev.source === "demo" ? Math.max(0, now - (ev.quoteAt ?? now)) : 0;
     }
-    this.jitterDemoQuotes();
+    if (config.seedTestFixture) this.jitterDemoQuotes();
     this.scanSeq += 1;
     this.lastScanAt = Date.now();
 
-    const shouldRefresh = this.mode !== "demo"
+    const shouldRefresh = !config.seedTestFixture
       && config.pm.enabled
       && Date.now() > this.nextCatalogAt
       && !this.refreshing;
@@ -255,7 +259,7 @@ export class MarketService {
     this.refreshing = true;
     try {
       const catalog = await pm.fetchCatalog(this.market, this.vols);
-      if (catalog.events.length < 6) throw new Error(`仅解析到 ${catalog.events.length} 个可交易市场`);
+      if (catalog.events.length < 1) throw new Error("Polymarket 没有可用的真实价格盘口");
       const held = new Set(this.repo.positionsAll().map(p => p.evId));
       const incoming = new Set(catalog.events.map(e => e.id));
       const preserved = this.events.filter(e => held.has(e.id) && !incoming.has(e.id)).map(e => ({ ...e, stale: true }));
@@ -272,39 +276,46 @@ export class MarketService {
       this.repo.eventsReplace(merged, true);
       this.pmStatus = {
         id: "polymarket", label: "Polymarket CLOB", state: "ok",
-        latencyMs: null, message: `已接入 ${catalog.events.length} 个可交易市场（扫描 ${catalog.scanned}）`,
+        latencyMs: null,
+        message: `已接入 ${catalog.events.length} 个真实市场（扫描 ${catalog.scanned}，解析 ${catalog.parsed}）`,
         lastOkAt: Date.now(), mode: "live"
       };
       this.lastCatalogAt = Date.now();
       this.nextCatalogAt = Date.now() + 3 * 60_000;
-      logger.info({ events: catalog.events.length, scanned: catalog.scanned }, "Polymarket catalog loaded");
+      logger.info({ events: catalog.events.length, scanned: catalog.scanned, parsed: catalog.parsed }, "Polymarket live catalog loaded");
       return true;
     } catch (err) {
       logger.warn({ err: (err as Error).message }, "Polymarket catalog unavailable");
+      const freshEnough = this.events.length > 0 && this.lastCatalogAt > 0 && Date.now() - this.lastCatalogAt < 10 * 60_000;
+      if (config.seedTestFixture) {
+        await this.buildCatalog(true);
+      } else if (!freshEnough) {
+        this.events = [];
+        this.catalogMode = "offline";
+        this.repo.eventsReplace([], true);
+      }
       this.pmStatus = {
-        id: "polymarket", label: "Polymarket CLOB", state: config.pm.enabled ? "degraded" : "disabled",
-        latencyMs: null, message: `数据源不可达：${(err as Error).message}`,
-        lastOkAt: this.pmStatus.lastOkAt, mode: this.catalogMode
+        id: "polymarket", label: "Polymarket CLOB",
+        state: config.pm.enabled ? "degraded" : "disabled",
+        latencyMs: null,
+        message: `实时目录不可用：${(err as Error).message}${freshEnough ? " · 暂用 10 分钟内的最后快照" : ""}`,
+        lastOkAt: this.pmStatus.lastOkAt,
+        mode: freshEnough ? "live" : this.catalogMode === "demo" ? "demo" : "offline"
       };
       this.lastCatalogAt = Date.now();
-      this.nextCatalogAt = Date.now() + 15 * 60_000;
-      if (!this.events.length) await this.buildCatalog(true);
+      this.nextCatalogAt = Date.now() + 60_000;
       return false;
     } finally {
       this.refreshing = false;
     }
   }
 
-  async refreshCatalog(force = false): Promise<{ mode: "live" | "demo"; events: number; message: string }> {
-    if (this.mode === "demo") {
+  async refreshCatalog(force = false): Promise<{ mode: "live" | "demo" | "offline"; events: number; message: string }> {
+    if (config.seedTestFixture) {
       await this.buildCatalog(force);
-      return { mode: "demo", events: this.events.length, message: "已重建示例目录" };
+      return { mode: "demo", events: this.events.length, message: "测试夹具：已重建示例目录" };
     }
-    const ok = await this.tryLiveCatalog();
-    if (!ok && force && this.mode === "auto") {
-      await this.buildCatalog(true);
-      return { mode: "demo", events: this.events.length, message: "Polymarket 不可达，已回退示例目录" };
-    }
+    await this.tryLiveCatalog();
     return { mode: this.catalogMode, events: this.events.length, message: this.pmStatus.message };
   }
 

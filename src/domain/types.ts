@@ -7,6 +7,7 @@ export type StrategyId = AccountId;
 export interface AccountSettings {
   id: AccountId;
   enabled: boolean;
+  /** Starting capital. Realized P&L is accumulated separately; current equity is derived. */
   equity: number;
   auto: boolean;
   kill: boolean;
@@ -14,6 +15,9 @@ export interface AccountSettings {
   minEdge: number;
   paperFillMs: number;
   lastKillAt: number | null;
+  realizedPnl: number;
+  closedTrades: number;
+  wins: number;
 }
 
 export interface AccountSummary extends AccountSettings {
@@ -24,6 +28,12 @@ export interface AccountSummary extends AccountSettings {
   holdLabel: string;
   maxOpen: number;
   requiresRealtime: boolean;
+  /** Current mark-to-market equity = starting capital + realized + unrealized. */
+  equity: number;
+  startingEquity: number;
+  realizedPnl: number;
+  totalPnl: number;
+  returnPct: number;
   pnl: number;
   usedPct: number;
   positions: number;
@@ -33,6 +43,8 @@ export interface AccountSummary extends AccountSettings {
   dailyLossPct: number;
   bookCost: number;
   netDelta: number;
+  closedTrades: number;
+  wins: number;
 }
 
 export interface User {
@@ -148,6 +160,7 @@ export interface Position {
   avg: number;
   hedgeUsd: number;
   hedgeEntry: number;
+  hedgeSide?: "long" | "short";
   accountId?: AccountId;
   strategyId?: AccountId;
   openedAt?: string;
@@ -165,6 +178,9 @@ export interface PositionView extends Position {
   hedgePnl: number;
   pnl: number;
   deltaUsd: number;
+  signedDelta: number;
+  hedgeSigned: number;
+  targetSide: "long" | "short";
   mk: MarketTick;
 }
 
@@ -180,6 +196,7 @@ export interface Book {
   maxCost: number;
   byUnd: Record<string, { face: number; cost: number; pnl: number }>;
   netDelta: number;
+  grossDelta: number;
   unhedged: number;
   undehedged: number;
   nowMs: number;
@@ -187,7 +204,7 @@ export interface Book {
 
 export interface OrderLeg {
   venue: "POLYMARKET" | "HYPERLIQUID";
-  side: "buy" | "short" | "sell";
+  side: "buy" | "short" | "long" | "sell";
   label: string;
   qty: number;
   filled: number;
@@ -296,7 +313,7 @@ export interface VenueStatus {
   latencyMs: number | null;
   message: string;
   lastOkAt: number | null;
-  mode: "live" | "demo" | "paper";
+  mode: "live" | "demo" | "offline" | "paper";
 }
 
 export interface EngineStatus {

@@ -51,6 +51,10 @@ export function buildState(
     }));
   const equity = selected.equity;
   const portfolioEquity = totalEquity(accounts);
+  const equitySeries = repo.equityAll(selected.id);
+  if (!equitySeries.length || Math.abs(equitySeries[equitySeries.length - 1]!.v - equity) > 0.005) {
+    equitySeries.push({ t: Date.now(), v: +equity.toFixed(2) });
+  }
 
   return {
     version: engine.getVersion(),
@@ -68,7 +72,10 @@ export function buildState(
     accounts,
     portfolio: {
       equity: portfolioEquity,
+      startingEquity: +accounts.reduce((sum, a) => sum + a.startingEquity, 0).toFixed(2),
       pnl: +accounts.reduce((sum, a) => sum + a.pnl, 0).toFixed(2),
+      realizedPnl: +accounts.reduce((sum, a) => sum + a.realizedPnl, 0).toFixed(2),
+      totalPnl: +accounts.reduce((sum, a) => sum + a.totalPnl, 0).toFixed(2),
       deployed: +accounts.reduce((sum, a) => sum + a.bookCost, 0).toFixed(2),
       usedPct: portfolioEquity > 0 ? accounts.reduce((sum, a) => sum + a.bookCost, 0) / portfolioEquity : 0,
       accounts: accounts.length,
@@ -79,9 +86,15 @@ export function buildState(
       name: selected.name,
       short: selected.short,
       equity,
+      startingEquity: selected.startingEquity,
+      realizedPnl: selected.realizedPnl,
+      totalPnl: selected.totalPnl,
+      returnPct: selected.returnPct,
+      closedTrades: selected.closedTrades,
+      wins: selected.wins,
       pnl: book.pnl,
       usedPct: equity > 0 ? (book.cost + book.margin) / equity : 0,
-      dailyLossPct: dailyLossPct(repo, selected.id, equity + book.pnl)
+      dailyLossPct: dailyLossPct(repo, selected.id, equity)
     },
     settings: {
       auto: selected.auto,
@@ -90,7 +103,6 @@ export function buildState(
       minEdge: selected.minEdge,
       paperFillMs: selected.paperFillMs,
       scanIntervalMs: global.scanIntervalMs,
-      allowDemoFallback: global.allowDemoFallback,
       liveTradingEnabled: global.liveTradingEnabled,
       cost: global.cost
     },
@@ -121,7 +133,7 @@ export function buildState(
     feed: repo.feedAll(selected.id, 12),
     riskEvents: repo.riskEventsAll(selected.id, 12),
     calendar,
-    equity: repo.equityAll(selected.id)
+    equity: equitySeries
   };
 }
 

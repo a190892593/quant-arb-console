@@ -1556,3 +1556,6 @@ body.has-drawer .toasts { right: auto; left: 20px; }
 
 #user-avatar{cursor:pointer}#user-avatar:hover{outline:2px solid var(--accent-line);outline-offset:2px}
 
+
+.leg-side.long{color:var(--pos);background:var(--pos-soft)}
+

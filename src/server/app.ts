@@ -18,7 +18,7 @@ import { buildState } from "../state.js";
 import { accountSettings, accountsAll, getSettings, saveSettings, type AppSettings } from "../settings.js";
 import type { AccountId } from "../domain/types.js";
 import { ACCOUNT_IDS, isAccountId } from "../domain/accounts.js";
-import { seedEquity, seedTradingData } from "../seed/index.js";
+import { resetLiveBaseline } from "../seed/index.js";
 import { clock } from "../util.js";
 import { logger } from "../logger.js";
 import * as hl from "../venues/hyperliquid.js";
@@ -594,7 +594,6 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
     const a = requireAdmin(req);
     const body = parse(z.object({
       scanIntervalMs: z.number().int().min(500).max(60_000).optional(),
-      allowDemoFallback: z.boolean().optional(),
       liveTradingEnabled: z.boolean().optional(),
       cost: z.object({
         hlFeeBps: z.number().min(0).max(1000).optional(),
@@ -709,10 +708,9 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
     if (engine.tradingMode() === "live" && repo.positionsAll().length > 0) {
       throw new EngineError("live_reset_blocked", "实盘模式下不能直接重置账本，请先在交易所平掉全部头寸", 409);
     }
-    repo.resetBusinessData();
-    for (const acct of accountsAll(repo)) seedEquity(repo, acct.id, acct.equity);
-    seedTradingData(repo, market);
-    repo.auditAdd({ t: nowClock(), actor: a.user.name, actorId: a.user.id, action: "重置数据", obj: "四账户账本", venue: "后台", detail: "每个账户的持仓、订单、待接管与审计已重建" });
+    resetLiveBaseline(repo);
+    await engine.refreshCatalog(actorOf(a));
+    repo.auditAdd({ t: nowClock(), actor: a.user.name, actorId: a.user.id, action: "重置数据", obj: "四账户纸面账本", venue: "管理", detail: "已清空纸面交易，四个账户各重置为 10,000 USDC，并重新拉取实时 Polymarket 目录" });
     engine.emit("state");
     return { ok: true, state: stateFor(a, accountFrom(req)) };
   });

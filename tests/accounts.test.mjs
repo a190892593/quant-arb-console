@@ -1,4 +1,4 @@
-import test from "node:test";
+﻿import test from "node:test";
 import assert from "node:assert/strict";
 import { ACCOUNT_DEFS, eligibleFor, accountDef, LATENCY_MAX_DAYS } from "../dist/domain/accounts.js";
 
@@ -20,7 +20,7 @@ test("accounts: exactly four defs and equities sum to the desk total", () => {
   assert.equal(ACCOUNT_DEFS.length, 4);
   assert.deepEqual(ACCOUNT_DEFS.map(a => a.id), ["prob", "converge", "latency", "longvol"]);
   const sum = ACCOUNT_DEFS.reduce((s, a) => s + a.defaultEquity, 0);
-  assert.ok(Math.abs(sum - 1_284_930.22) < 0.005, String(sum));
+  assert.ok(Math.abs(sum - 40_000) < 0.005, String(sum));
   assert.equal(accountDef("latency").name, "报价滞后");
 });
 

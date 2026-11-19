@@ -141,11 +141,19 @@ export function positionView(p: Position, ctx: BookContext): PositionView | null
   const d = derive(ev, ctx);
   const mk = ctx.market?.[ev.und] ?? { px: 0, chg: 0 };
   const contractPnl = p.qty * (ev.bid - p.avg);
-  const hedgePnl = p.hedgeEntry > 0 ? p.hedgeUsd * (p.hedgeEntry - mk.px) / p.hedgeEntry : 0;
-  const target = p.qty * Math.abs(ev.delta);
+  const hedgeSide = p.hedgeSide ?? "short";
+  const hedgePnl = p.hedgeEntry > 0
+    ? (hedgeSide === "long"
+        ? p.hedgeUsd * (mk.px - p.hedgeEntry) / p.hedgeEntry
+        : p.hedgeUsd * (p.hedgeEntry - mk.px) / p.hedgeEntry)
+    : 0;
+  const signedDelta = p.qty * ev.delta;
+  const target = Math.abs(signedDelta);
+  const targetSide: "long" | "short" = signedDelta >= 0 ? "short" : "long";
+  const hedgeSigned = (hedgeSide === "long" ? 1 : -1) * p.hedgeUsd;
   const ratio = target > 0 ? p.hedgeUsd / target : 1;
   const cost = p.qty * p.avg;
-  const deltaUsd = target - p.hedgeUsd;
+  const deltaUsd = signedDelta + hedgeSigned;
   return {
     ...p,
     ev,
@@ -158,6 +166,9 @@ export function positionView(p: Position, ctx: BookContext): PositionView | null
     hedgePnl,
     pnl: contractPnl + hedgePnl,
     deltaUsd,
+    signedDelta,
+    hedgeSigned,
+    targetSide,
     mk
   };
 }
@@ -184,7 +195,9 @@ export function book(ctx: BookContext): Book {
     item.pnl += r.pnl;
     byUnd[key] = item;
   }
-  const unhedged = rows.filter(r => r.ratio < 0.9).length;
+  const netDelta = rows.reduce((s, r) => s + r.deltaUsd, 0);
+  const grossDelta = rows.reduce((s, r) => s + Math.abs(r.deltaUsd), 0);
+  const unhedged = rows.filter(r => r.target > 0 && r.ratio < 0.97).length;
   return {
     rows,
     face,
@@ -196,7 +209,8 @@ export function book(ctx: BookContext): Book {
     settle7,
     maxCost,
     byUnd,
-    netDelta: Math.max(0, target - hedge),
+    netDelta,
+    grossDelta,
     unhedged,
     undehedged: unhedged,
     nowMs: ctx.now ?? Date.now()
@@ -261,13 +275,32 @@ export function touchFair(input: { spot: number; strike: number; vol: number; da
   return clamp(2 * normalCdf(-distance), 0.001, 0.999);
 }
 
-/** Normalised hedge ratio used for perp sizing (0.5%–60% of contract face). */
+/**
+ * True perp hedge notional per $1 of contract face for a cash-or-nothing binary.
+ *
+ *   H / face = φ(d₂) / (σ√T)
+ *
+ * This is the derivative with respect to log-spot, i.e. the perp notional that
+ * makes the book locally delta-neutral. It is commonly 1–5× face for near-ATM
+ * binaries, not the 5–60% "hedge budget" the old UI displayed.
+ */
 export function hedgeDelta(input: { spot: number; strike: number; vol: number; days: number; direction: 1 | -1 }): number {
   const { spot, strike, vol, days, direction } = input;
   if (!(spot > 0) || !(strike > 0)) return 0;
   const T = Math.max(1 / 365, days / 365);
-  const sigma = Math.max(0.01, vol);
+  const sigma = Math.max(0.005, vol);
   const d2 = (Math.log(spot / strike) - 0.5 * sigma * sigma * T) / (sigma * Math.sqrt(T));
-  const raw = 0.42 * normalPdf(d2) / 0.3989422804014327 * Math.sqrt(Math.min(1, T * 4));
-  return clamp(raw, 0.005, 0.6) * (direction < 0 ? -1 : 1);
+  const ratio = normalPdf(d2) / (sigma * Math.sqrt(T));
+  return (direction < 0 ? -1 : 1) * Math.min(50, ratio);
+}
+
+/** Numeric delta of a touch option with respect to log-spot. */
+export function touchDelta(input: { spot: number; strike: number; vol: number; days: number }): number {
+  const { spot, strike, vol, days } = input;
+  if (!(spot > 0) || !(strike > 0)) return 0;
+  const h = 0.01;
+  const up = touchFair({ spot: spot * (1 + h), strike, vol, days });
+  const down = touchFair({ spot: spot * (1 - h), strike, vol, days });
+  if (up == null || down == null) return 0;
+  return Math.max(-50, Math.min(50, (up - down) / (2 * h)));
 }

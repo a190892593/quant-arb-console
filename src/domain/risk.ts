@@ -21,7 +21,7 @@ export function limitUsage(book: Book, equity: number, limits: Limit[]): Limit[]
     let used = 0;
     if (l.id === "pm") used = book.cost;
     if (l.id === "hl") used = book.margin;
-    if (l.id === "delta") used = book.netDelta;
+    if (l.id === "delta") used = Math.abs(book.netDelta);
     if (l.id === "settle") used = book.settle7;
     if (l.id === "conc") used = equity > 0 ? book.maxCost / equity * 100 : 0;
     return { ...l, used };
@@ -65,16 +65,21 @@ export interface CheckResult {
 export function checkOrder(input: OrderCheckInput): CheckResult {
   const { event: d, qty, book, limits, rules, equity, kill, source, dailyLossPct, ackFatEdge } = input;
   const failures: CheckFailure[] = [];  const newCost = qty * d.ask;
-  const newHedge = qty * Math.abs(d.delta);
+  const newSignedDelta = qty * d.delta;
+  const newHedge = Math.abs(newSignedDelta);
   const newMargin = newHedge / 4.8;
   const pmCost = book.cost + newCost;
   const margin = book.margin + newMargin;
-  const delta = Math.max(0, book.target + newHedge - (book.hedge + newHedge));
+  // A properly filled pair adds no residual delta; the execution window is tracked separately.
+  const delta = book.netDelta;
   const settle7 = book.settle7 + (d.days <= 7 ? newCost : 0);
   const concPct = equity > 0 ? Math.max(book.maxCost, newCost) / equity * 100 : 100;
 
   if (kill) failures.push({ code: "kill_switch", message: "熔断已触发，新开仓与补对冲均已停止。" });
   if (!(qty >= 100)) failures.push({ code: "qty_invalid", message: "合约腿数量至少 100 股。" });
+  if (Math.abs(d.delta) > 25) {
+    failures.push({ code: "delta_too_large", message: `该事件真实 Delta 为 ${d.delta.toFixed(1)}x 面值，超过 25x 上限，拒绝建仓。` });
+  }
   if (qty > 0 && newCost > d.depth) {
     failures.push({ code: "depth_exceeded", message: `计划 ${fmtUsd(newCost)} 超过盘口可成交 ${fmtUsd(d.depth)}。` });
   }
@@ -98,7 +103,7 @@ export function checkOrder(input: OrderCheckInput): CheckResult {
   const pm = limit("pm"), hl = limit("hl"), dl = limit("delta"), st = limit("settle"), cc = limit("conc");
   if (pm && pmCost > pm.value) failures.push({ code: "limit_pm", message: `Polymarket 敞口将达 ${fmtUsd(pmCost)}，超过限额 ${fmtUsd(pm.value)}。` });
   if (hl && margin > hl.value) failures.push({ code: "limit_hl", message: `Hyperliquid 保证金将达 ${fmtUsd(margin)}，超过限额 ${fmtUsd(hl.value)}。` });
-  if (dl && delta > dl.value) failures.push({ code: "limit_delta", message: `净 Delta 将达 ${fmtUsd(delta)}，超过限额 ${fmtUsd(dl.value)}。` });
+  if (dl && Math.abs(delta) > dl.value) failures.push({ code: "limit_delta", message: `净 Delta 将达 ${fmtUsd(Math.abs(delta))}，超过限额 ${fmtUsd(dl.value)}。` });
   if (st && settle7 > st.value) failures.push({ code: "limit_settle", message: `7 日内结算敞口将达 ${fmtUsd(settle7)}，超过限额 ${fmtUsd(st.value)}。` });
   if (cc && concPct > cc.value) failures.push({ code: "limit_conc", message: `单事件集中度将达 ${concPct.toFixed(1)}%，超过限额 ${cc.value}%。` });
 

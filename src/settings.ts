@@ -7,7 +7,6 @@ import { accountDef, defaultAccountSettings, mergeAccountSettings } from "./doma
 export interface AppSettings {
   scanIntervalMs: number;
   cost: CostConfig;
-  allowDemoFallback: boolean;
   liveTradingEnabled: boolean;
   startedAt: number;
 }
@@ -15,7 +14,6 @@ export interface AppSettings {
 export const DEFAULT_SETTINGS: AppSettings = {
   scanIntervalMs: 2500,
   cost: { ...DEFAULT_COST },
-  allowDemoFallback: true,
   liveTradingEnabled: false,
   startedAt: Date.now()
 };
@@ -83,10 +81,10 @@ export function totalEquity(accounts: AccountSettings[]): number {
 
 export function dailyLossPct(repo: Repository, accountId: AccountId, currentEquity: number): number {
   const points = repo.equityAll(accountId);
-  if (points.length < 2) return 0;
-  const last = points[points.length - 1]!;
-  const prev = points[points.length - 2]!;
-  const baseline = last.v || prev.v;
-  if (!(baseline > 0)) return 0;
-  return (currentEquity / baseline - 1) * 100;
+  if (!points.length) return 0;
+  const dayStart = new Date();
+  dayStart.setHours(0, 0, 0, 0);
+  const base = points.find(p => p.t >= dayStart.getTime()) ?? points[0]!;
+  if (!(base.v > 0)) return 0;
+  return (currentEquity / base.v - 1) * 100;
 }

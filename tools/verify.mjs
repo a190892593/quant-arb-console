@@ -113,6 +113,7 @@ const server = spawn(process.execPath, [join(ROOT, "dist", "index.js")], {
     HOST: "127.0.0.1",
     DB_PATH: dbPath,
     MARKET_DATA_MODE: "demo",
+    SEED_TEST_FIXTURE: "1",
     PM_ENABLED: "false",
     HL_ENABLED: "false",
     LOG_LEVEL: "silent",
@@ -197,6 +198,13 @@ try {
 
   await evaluate(`location.hash = "#/scanner"`);
   await sleep(400);
+  const hedgeLabel = await evaluate(`document.querySelector('#opp-body tr .hedge-cell small')?.textContent || ""`);
+  check("扫描器显示真实 Delta 倍数与对冲方向", /x/.test(hedgeLabel) && /做空|做多/.test(hedgeLabel), hedgeLabel);
+  const neutral = await evaluate(`(async () => {
+    const r = await fetch('/api/state?account=prob'); const s = (await r.json()).state;
+    return { net: s.book.netDelta, cost: s.book.cost, ratios: s.book.rows.map(x => x.ratio), sides: s.book.rows.map(x => x.hedgeSide) };
+  })()`);
+  check("账户初始账本为真实 Delta 中性", Math.abs(neutral.net) < Math.max(100, neutral.cost * 0.03) && neutral.ratios.every(r => Math.abs(r - 1) < 0.05), JSON.stringify(neutral));
   await evaluate(`(() => { const el = document.querySelector('#q'); el.value = 'zzzz-no-match'; el.dispatchEvent(new Event('input', { bubbles: true })); })()`);
   check("扫描器空态", await evaluate(`!document.querySelector('#opp-empty').hidden && document.querySelectorAll('#opp-body tr').length === 0`));
   await evaluate(`document.querySelector('#reset-filters').click()`);
