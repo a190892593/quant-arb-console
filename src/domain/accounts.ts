@@ -15,70 +15,33 @@ export interface AccountDef {
 }
 
 /**
- * One strategy, one account. Accounts never share equity, positions, limits or kill switches.
- * The four definitions below are the only place where the desk is configured.
+ * Two deterministic desks, one account each: protocol-level NegRisk conversion
+ * and high-liquidity market making. The retired directional strategies are gone.
  */
 export const ACCOUNT_DEFS: readonly AccountDef[] = [
   {
-    id: "prob",
-    name: "概率偏差",
-    short: "PROB",
-    desc: "Polymarket 二元合约与 Hyperliquid 数字期权公允值之间的概率差。",
-    logic: "只做 2–60 天事件；买入被低估的 YES，用永续空头对冲 Delta，持有到收敛或结算。",
-    holdLabel: "2–60 天",
-    paperFillMs: 4200,
-    maxOpen: 3,
-    defaultEquity: 10_000,
-    defaultMinEdge: 2.5
-  },
-  {
-    id: "converge",
-    name: "结算收敛",
-    short: "CONV",
-    desc: "临近结算、结果已高度确定的合约仍以折价成交，赚取最后一档收敛。",
-    logic: "只买公充概率 ≥ 82% 且剩余 ≤ 72 小时的合约；尾部用永续做小比例对冲。",
-    holdLabel: "< 72 小时",
-    paperFillMs: 2200,
-    maxOpen: 2,
-    defaultEquity: 10_000,
-    defaultMinEdge: 1.2
-  },
-  {
-    id: "latency",
-    name: "报价滞后",
-    short: "LAG",
-    desc: "Hyperliquid 标记价已经移动，Polymarket 报价仍是数秒前的陈旧盘口。",
-    logic: "只做 14 天内事件；抢陈旧卖价并立刻用永续对冲，吃报价追平前的瞬时差；持有以分钟计。",
-    holdLabel: "秒–分钟",
-    paperFillMs: 600,
-    maxOpen: 2,
-    defaultEquity: 10_000,
-    defaultMinEdge: 1.5,
-    requiresRealtime: true
-  },
-  {
-    id: "longvol",
-    name: "长端波动率",
-    short: "VOL",
-    desc: "长周期数字期权对波动率假设最敏感，模型与长端报价的偏差更持久。",
-    logic: "只做 60 天以上事件；按 90 日已实现波动率加溢价建模，买入低估 YES 并用永续对冲。",
-    holdLabel: "60–365 天",
-    paperFillMs: 5200,
-    maxOpen: 2,
-    defaultEquity: 10_000,
-    defaultMinEdge: 3.0
-  },
-  {
-    id: "complete",
-    name: "跨场所完整集",
-    short: "CS",
-    desc: "同一事件在一家场所买 YES、在另一家场所买 NO，合计成本 < $1 时锁定结算收益。",
-    logic: "只接受标的、行权价、结算时间与结算源完全一致的两条腿；两腿成交后到期恒定收回 $1，不承担方向敞口。",
-    holdLabel: "到结算",
-    paperFillMs: 600,
-    maxOpen: 3,
+    id: "negrisk",
+    name: "NegRisk 转换",
+    short: "NEG",
+    desc: "多结果互斥事件中，所有结果的 YES 买价合计高于 100¢ 时，买入全部 NO 篮子，经 NegRisk Adapter 转换为 YES 后按买价卖出。",
+    logic: "只做 NegRisk 多结果事件；一次买入每个结果的 1 份 NO，转换后卖出全部 YES，成交瞬间锁定 n × (ΣYES买价 − 1) 的协议层价差，账本不留方向敞口。",
+    holdLabel: "成交即锁定",
+    paperFillMs: 400,
+    maxOpen: 6,
     defaultEquity: 10_000,
     defaultMinEdge: 0.5
+  },
+  {
+    id: "marketmaking",
+    name: "高流动性做市",
+    short: "MM",
+    desc: "在成交最活跃、盘口最厚的二元市场双边报价，赚取买卖价差；用库存偏斜与减仓线管理方向风险。",
+    logic: "只做 24h 成交额与盘口深度达标、价差足够覆盖风险的市场；按库存偏移双边报价，成交后按中价盯市，库存触及减仓线时只报减仓方向或直接平仓。",
+    holdLabel: "秒–分钟",
+    paperFillMs: 200,
+    maxOpen: 8,
+    defaultEquity: 10_000,
+    defaultMinEdge: 0
   }
 ];
 
@@ -109,7 +72,7 @@ export function defaultAccountSettings(): AccountSettings[] {
   }));
 }
 
-/** Merge persisted accounts with the current definitions so new accounts appear automatically. */
+/** Merge persisted accounts with the current definitions so new desks appear automatically. */
 export function mergeAccountSettings(stored?: Array<Partial<AccountSettings>> | null): AccountSettings[] {
   const byId = new Map((stored ?? []).filter(a => isAccountId(a.id)).map(a => [a.id as AccountId, a]));
   return ACCOUNT_DEFS.map(def => {
@@ -131,38 +94,9 @@ export function mergeAccountSettings(stored?: Array<Partial<AccountSettings>> | 
   });
 }
 
-export const LATENCY_MIN_AGE_MS = 6_000;
-export const LATENCY_MAX_DAYS = 14;
-export const CONVERGE_MAX_DAYS = 3;
-export const CONVERGE_MIN_FAIR = 0.82;
-
-/**
- * Each account scans the whole market with its own eligibility rule. Accounts are independent,
- * so the same event may legitimately be traded by more than one desk.
- */
-export function eligibleFor(id: AccountId, ev: EventContract, market: Market, now = Date.now()): boolean {
-  const days = (Date.parse(ev.due) - now) / 86_400_000;
-  if (days <= 0) return false;
-  if (id === "complete") return ev.kind === "complete";
-  if (ev.kind === "complete") return false;
-  switch (id) {
-    case "converge":
-      return days <= CONVERGE_MAX_DAYS && ev.fair >= CONVERGE_MIN_FAIR && ev.fair <= 0.995;
-    case "latency": {
-      if (days > LATENCY_MAX_DAYS) return false;
-      const gross = (ev.fair - (ev.ask + ev.bid) / 2) * 100;
-      const age = ev.quoteAgeMs ?? 0;
-      const moved = ev.quoteRefPx && market[ev.und]?.px
-        ? Math.abs(market[ev.und]!.px / ev.quoteRefPx - 1)
-        : 0;
-      return age >= LATENCY_MIN_AGE_MS && gross >= 1.2 && (moved >= 0.0004 || gross >= 2);
-    }
-    case "longvol":
-      return days > 60;
-    case "prob":
-    default:
-      return days > 1.2 && days <= 60;
-  }
+/** Neither desk uses the retired single-event directional screen. */
+export function eligibleFor(_id: AccountId, _ev: EventContract, _market: Market, _now = Date.now()): boolean {
+  return false;
 }
 
 export function assertAccountWithinBudget(equity: number, deployed: number, nextEquity: number): string | null {

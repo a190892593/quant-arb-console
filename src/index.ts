@@ -9,7 +9,7 @@ import { logger } from "./logger.js";
 async function main(): Promise<void> {
   const repo = new Repository(config.dbPath);
   ensureDefaults(repo);
-  if (!config.seedTestFixture && repo.metaGet("liveBaselineV2") !== "1") resetLiveBaseline(repo);
+  if (!config.seedTestFixture && repo.metaGet("liveBaselineV3") !== "1") resetLiveBaseline(repo);
   ensureRuleDefaults(repo);
 
   const market = new MarketService(repo);
@@ -30,7 +30,8 @@ async function main(): Promise<void> {
     marketDataMode: config.marketDataMode,
     tradingMode: config.tradingMode,
     catalogMode: market.catalogMode,
-    events: market.events.length
+    negRisk: market.negRisk.length,
+    mmUniverse: market.mmUniverse.length
   }, "CONVERGENCE server ready");
 
   let closing = false;

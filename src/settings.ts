@@ -37,15 +37,15 @@ export function saveSettings(repo: Repository, patch: Partial<AppSettings>): App
 }
 
 /**
- * Four independent accounts. Equity, auto-execution, kill switch, min edge and paper-fill
- * latency are all per account; only the shared market/cost configuration lives globally.
+ * Two independent desks. Equity, auto-execution, kill switch, min edge and paper-fill
+ * latency are per account; only the shared market/cost configuration lives globally.
  */
 export function accountsAll(repo: Repository): AccountSettings[] {
   const stored = repo.settingGet<Array<Partial<AccountSettings>> | null>("accounts", null);
   if (!stored) {
     const legacy = repo.settingGet<{ auto?: boolean; kill?: boolean; minEdge?: number; paperFillMs?: number } | null>("app", null);
-    // Only S1 inherits the old single-book switches; S2–S4 start on their own strategy defaults.
-    const seeded = defaultAccountSettings().map(a => a.id !== "prob" ? a : {
+    // Only the NegRisk desk inherits the old single-book switches; market making starts on its own defaults.
+    const seeded = defaultAccountSettings().map(a => a.id !== "negrisk" ? a : {
       ...a,
       auto: typeof legacy?.auto === "boolean" ? legacy.auto : a.auto,
       kill: typeof legacy?.kill === "boolean" ? legacy.kill : a.kill,

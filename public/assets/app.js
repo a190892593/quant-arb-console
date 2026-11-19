@@ -1,2923 +1,835 @@
 /* ============================================================
-   CONVERGENCE · 终端交互层（API 驱动）
+   CONVERGENCE · 双策略确定性套利台
+   NegRisk conversion + high-liquidity market making.
    ============================================================ */
 
-import { CONV as D, api, download } from "./store.js";
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
 
-(function () {
-  "use strict";
+const S = {
+  data: null,
+  account: localStorage.getItem("conv.account") || "negrisk",
+  route: null,
+  timer: null,
+  polling: false,
+  modalOpen: false
+};
 
-  const $ = (s, r) => (r || document).querySelector(s);
-  const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
+/* ---------------- formatting ---------------- */
+const usd = (n, dp = 0) => "$" + Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: dp, maximumFractionDigits: dp });
+const signedUsd = (n, dp = 0) => (n >= 0 ? "+" : "−") + "$" + Math.abs(Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: dp, maximumFractionDigits: dp });
+const cents = n => (Number(n) * 100).toFixed(1) + "¢";
+const pct = (n, dp = 1) => (Number(n) * 100).toFixed(dp) + "%";
+const bps = n => (Math.round(Number(n)) >= 0 ? "+" : "−") + Math.abs(Math.round(Number(n))).toLocaleString("en-US");
+const share = n => Number(n || 0).toLocaleString("en-US", { maximumFractionDigits: 0 });
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const dateShort = iso => {
+  const d = new Date(iso);
+  return Number.isFinite(d.getTime()) ? (d.getMonth() + 1) + "-" + String(d.getDate()).padStart(2, "0") : "—";
+};
+const timeShort = ts => {
+  const d = new Date(ts);
+  return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+};
+const acctCode = id => {
+  const i = (S.data?.accounts || []).findIndex(a => a.id === id);
+  return i >= 0 ? "S" + (i + 1) : "S?";
+};
+const acct = id => (S.data?.accounts || []).find(a => a.id === (id || S.account)) || null;
+const mm = () => S.data?.mm || { markets: [], fills: [], positions: [], totals: {}, params: {}, halted: false };
+const neg = () => S.data?.negRisk || [];
+const conversions = () => S.data?.conversions || [];
 
-  if (location.search.indexOf("debug=1") > -1) {
-    window.addEventListener("error", function (e) {
-      const box = document.createElement("div");
-      box.style.cssText = "position:fixed;z-index:9999;left:0;right:0;top:0;background:#a3212b;color:#fff;padding:10px 14px;font:12px/1.5 monospace;white-space:pre-wrap";
-      box.textContent = "JS ERROR: " + e.message + "  @" + (e.filename || "") + ":" + e.lineno;
-      document.body.appendChild(box);
+/* ---------------- api ---------------- */
+async function api(path, { method = "GET", body } = {}) {
+  const headers = { accept: "application/json" };
+  if (body !== undefined) headers["content-type"] = "application/json";
+  if (method !== "GET" && S.data?.csrf) headers["x-csrf-token"] = S.data.csrf;
+  const res = await fetch(path, { method, headers, credentials: "same-origin", body: body === undefined ? undefined : JSON.stringify(body) });
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch { /* non-json */ }
+  if (res.status === 401) { location.href = "/login"; throw new Error("登录已失效"); }
+  if (!res.ok) throw new Error(json?.error?.message || text || ("HTTP " + res.status));
+  return json;
+}
+
+async function loadState({ silent = false } = {}) {
+  if (S.polling) return;
+  S.polling = true;
+  try {
+    const res = await api("/api/state?account=" + encodeURIComponent(S.account));
+    S.data = res.state;
+    if (!S.data?.accounts?.some(a => a.id === S.account)) S.account = S.data.accounts[0]?.id || "negrisk";
+    renderChrome();
+    renderView();
+  } catch (err) {
+    if (!silent) toast("加载失败", err.message, "neg");
+    if (/登录/.test(err.message)) location.href = "/login";
+  } finally {
+    S.polling = false;
+  }
+}
+
+/* ---------------- toast / modal ---------------- */
+function toast(title, msg, kind = "ok") {
+  const box = $("#toasts");
+  const el = document.createElement("div");
+  el.className = "toast " + kind;
+  el.innerHTML = "<b>" + esc(title) + "</b>" + (msg ? "<span>" + esc(msg) + "</span>" : "");
+  box.appendChild(el);
+  setTimeout(() => { el.style.opacity = "0"; el.style.transform = "translateY(6px)"; }, 4400);
+  setTimeout(() => el.remove(), 4900);
+}
+
+function openModal({ eyebrow = "确认", title, body, actions = [], onOpen }) {
+  S.modalOpen = true;
+  $("#modal-eyebrow").textContent = eyebrow;
+  $("#modal-title").textContent = title;
+  $("#modal-body").innerHTML = body;
+  const foot = $("#modal-actions");
+  foot.innerHTML = "";
+  for (const a of actions) {
+    const b = document.createElement("button");
+    b.className = "btn " + (a.kind || "btn-ghost");
+    b.textContent = a.label;
+    b.addEventListener("click", async () => {
+      if (a.keepOpen) { await a.onClick?.(); return; }
+      closeModal();
+      await a.onClick?.();
     });
+    foot.appendChild(b);
+  }
+  $("#modal-root").hidden = false;
+  onOpen?.();
+}
+function closeModal() {
+  S.modalOpen = false;
+  $("#modal-root").hidden = true;
+}
+$("#modal-x").addEventListener("click", closeModal);
+$("#modal-root").addEventListener("click", e => { if (e.target === $("#modal-root")) closeModal(); });
+
+/* ---------------- chrome ---------------- */
+function renderChrome() {
+  const d = S.data;
+  if (!d) return;
+  const a = acct() || d.accounts[0];
+  if (!a) return;
+  $("#rail-acct-label").textContent = acctCode(a.id) + " · " + a.name;
+  $("#rail-equity").textContent = usd(a.equity, 2);
+  $("#rail-sub").innerHTML = '<span class="dot ' + (a.kill ? "bad" : "ok") + '"></span>' + (a.kill ? "已熔断" : "纸面账本 · 独立核算");
+  $("#acct-code").textContent = acctCode(a.id);
+  $("#acct-name").textContent = a.name;
+  $("#acct-equity").textContent = usd(a.equity, 0);
+
+  $("#acct-menu").innerHTML = d.accounts.map(x =>
+    '<button class="acct-opt' + (x.id === a.id ? " is-on" : "") + '" data-act="switch-account" data-id="' + x.id + '">' +
+      '<span class="acct-code">' + acctCode(x.id) + "</span>" +
+      '<span class="meta"><b>' + esc(x.name) + "</b><small>" + usd(x.equity, 0) + " · " + (x.kill ? "熔断" : x.auto ? "自动" : "手动") + "</small></span>" +
+      '<span class="dot ' + (x.kill ? "bad" : "ok") + '"></span>' +
+    "</button>").join("");
+
+  const m = d.market || {};
+  if (m.BTC) {
+    $("#px-btc").textContent = Number(m.BTC.px).toLocaleString("en-US", { maximumFractionDigits: 0 });
+    $("#chg-btc").textContent = (m.BTC.chg >= 0 ? "+" : "−") + Math.abs(m.BTC.chg).toFixed(2) + "%";
+    $("#chg-btc").className = m.BTC.chg >= 0 ? "pos" : "neg";
+  }
+  if (m.ETH) {
+    $("#px-eth").textContent = Number(m.ETH.px).toLocaleString("en-US", { maximumFractionDigits: 0 });
+    $("#chg-eth").textContent = (m.ETH.chg >= 0 ? "+" : "−") + Math.abs(m.ETH.chg).toFixed(2) + "%";
+    $("#chg-eth").className = m.ETH.chg >= 0 ? "pos" : "neg";
   }
 
-  /* ---------------- state ---------------- */
-  const app = {
-    route: "overview",
-    kill: false,
-    auto: true,
-    scanSeq: 48219,
-    lastScan: Date.now(),
-    sel: null,
-    expanded: null,
-    editingLimit: null,
-    auditActor: "all",
-    posFilter: "all",
-    range: 30,
-    accounts: [],
-    accountId: "prob",
-    portfolio: {},
-    limits: [],
-    rules: [],
-    reviews: [],
-    orders: [],
-    audit: [],
-    lang: localStorage.getItem("conv.lang") === "en" ? "en" : "zh",
-    scanMode: localStorage.getItem("conv.scanMode") !== "0",
-    railCollapsed: localStorage.getItem("conv.railCollapsed") === "1",
-    opp: { q: "", cat: "all", minEdge: 2.5, horizon: "all", onlyReady: false, sortKey: "edge", sortDir: "desc" },
-    cols: (() => {
-      const base = { depth: true, hedge: true, conf: true, due: true, status: true };
-      try { return { ...base, ...(JSON.parse(localStorage.getItem("conv.cols") || "{}")) }; } catch { return base; }
-    })()
-  };
-  document.documentElement.lang = app.lang === "en" ? "en" : "zh-CN";
-  document.querySelector(".app")?.classList.toggle("is-collapsed", app.railCollapsed);
+  const pm = (d.venues || []).find(v => v.id === "polymarket");
+  const hl = (d.venues || []).find(v => v.id === "hyperliquid");
+  paintVenue($("#venue-pm"), pm);
+  paintVenue($("#venue-hl"), hl);
+  paintDot($("#rail-pm-dot"), $("#rail-pm"), pm);
+  paintDot($("#rail-hl-dot"), $("#rail-hl"), hl);
 
-  let ordSeq = 8841;
+  $("#sim-switch").setAttribute("aria-checked", String(d.settings.paperTradingEnabled !== false));
+  $("#auto-switch").setAttribute("aria-checked", String(!!a.auto));
+  $("#auto-switch").disabled = !!a.kill;
+  const killBtn = $("#kill-btn");
+  killBtn.textContent = a.kill ? "解除熔断" : "熔断";
+  killBtn.classList.toggle("btn-danger-ghost", !a.kill);
+  killBtn.classList.toggle("btn-primary", !!a.kill);
 
-  function syncFromState() {
-    app.kill = !!D.settings.kill;
-    app.auto = !!D.settings.auto;
-    app.scanSeq = D.engine.scanSeq || app.scanSeq;
-    app.accounts = D.accounts || [];
-    app.accountId = D.accountId || "prob";
-    app.portfolio = D.portfolio || {};
-    app.limits = D.limits;
-    app.rules = D.rules;
-    app.orders = D.orders;
-    app.reviews = D.reviews;
-    app.audit = D.audit;
-    for (const o of D.orders) {
-      const n = Number(String(o.id).replace(/\D/g, "")) || 0;
-      if (n > ordSeq) ordSeq = n;
+  const banner = $("#banner");
+  if (a.kill || d.settings.paperTradingEnabled === false) {
+    banner.hidden = false;
+    $("#banner-title").textContent = a.kill ? acctCode(a.id) + " 已熔断" : "模拟交易已暂停";
+    $("#banner-text").textContent = a.kill ? "新转换与新报价停止；已有做市库存保留。" : "只允许平仓，不再产生新成交。";
+  } else {
+    banner.hidden = true;
+  }
+
+  $("#nav-neg").textContent = neg().filter(o => o.status === "ready").length;
+  $("#nav-neg").classList.toggle("is-hot", neg().some(o => o.status === "ready"));
+  $("#nav-mm").textContent = mm().totals?.quoted ?? 0;
+
+  const user = d.user || {};
+  $("#user-name").textContent = user.name || "—";
+  $("#user-email").textContent = user.email || "—";
+  $("#user-avatar").textContent = (user.name || "U").slice(0, 1);
+  $("#nav-admin").hidden = user.role !== "admin";
+}
+function paintVenue(btn, v) {
+  if (!btn || !v) return;
+  const ok = v.state === "ok";
+  btn.querySelector(".dot").className = "dot " + (ok ? "ok" : v.state === "down" ? "bad" : v.state === "disabled" ? "" : "warn");
+  btn.title = v.label + " · " + v.message;
+}
+function paintDot(dot, label, v) {
+  if (!dot || !v) return;
+  dot.className = "dot " + (v.state === "ok" ? "ok" : v.state === "down" ? "bad" : "warn");
+  if (label) label.textContent = v.label + (v.mode === "demo" ? " · 示例" : v.state === "ok" ? " · 在线" : "");
+}
+
+/* ---------------- charts ---------------- */
+function sparkline(points) {
+  const vals = (points || []).map(p => p.v);
+  if (vals.length < 2) return "";
+  const w = 600, h = 56, min = Math.min(...vals), max = Math.max(...vals);
+  const span = Math.max(0.0001, max - min);
+  const pts = vals.map((v, i) => [(i / (vals.length - 1)) * w, h - 4 - ((v - min) / span) * (h - 10)]);
+  const line = pts.map(p => p[0].toFixed(1) + "," + p[1].toFixed(1)).join(" ");
+  const area = "0," + h + " " + line + " " + w + "," + h;
+  return '<svg viewBox="0 0 ' + w + " " + h + '" preserveAspectRatio="none" aria-hidden="true">' +
+    '<polygon points="' + area + '" fill="rgba(94,224,232,.10)"/>' +
+    '<polyline points="' + line + '" fill="none" stroke="#5ee0e8" stroke-width="1.6"/>' +
+    "</svg>";
+}
+
+/* ---------------- router ---------------- */
+const routes = ["overview", "accounts", "negrisk", "mm", "risk", "admin"];
+const titles = { overview: "总览", accounts: "策略账户", negrisk: "NegRisk 转换", mm: "做市台", risk: "风控", admin: "管理" };
+
+function routeFromHash() {
+  const part = (location.hash || "#/overview").replace(/^#\//, "").split("/")[0];
+  return routes.includes(part) ? part : "overview";
+}
+function go(route, push = true) {
+  if (!routes.includes(route)) route = "overview";
+  if (route === "admin" && S.data?.user?.role !== "admin") {
+    toast("仅管理员", "当前账号没有管理权限。", "neg");
+    route = "overview";
+  }
+  S.route = route;
+  $$(".view").forEach(v => { v.hidden = v.dataset.view !== route; });
+  $$(".nav-item").forEach(n => n.classList.toggle("is-active", n.dataset.route === route));
+  document.title = "CONVERGENCE · " + (titles[route] || "");
+  if (push) history.replaceState(null, "", "#/" + route);
+  $("#viewport").scrollTop = 0;
+  renderView();
+}
+
+/* ---------------- render dispatcher ---------------- */
+function renderView() {
+  if (!S.data) return;
+  const view = $("#view-" + S.route);
+  if (!view) return;
+  const html = {
+    overview: renderOverview,
+    accounts: renderAccounts,
+    negrisk: renderNegrisk,
+    mm: renderMm,
+    risk: renderRisk,
+    admin: renderAdmin
+  }[S.route]?.();
+  if (html != null) view.innerHTML = html;
+}
+
+/* ============================================================
+   Overview
+   ============================================================ */
+function pageHead(eyebrow, title, sub, actions) {
+  return '<div class="page-head"><div class="page-head-main"><span class="eyebrow">' + esc(eyebrow) + "</span>" +
+    "<h1>" + esc(title) + '</h1><p class="page-sub">' + esc(sub) + "</p></div>" +
+    '<div class="page-actions">' + (actions || "") + "</div></div>";
+}
+
+function renderOverview() {
+  const d = S.data;
+  const p = d.portfolio || {};
+  const n = acct("negrisk");
+  const m = acct("marketmaking");
+  const totals = mm().totals || {};
+  const ready = neg().filter(o => o.status === "ready");
+  const best = ready[0];
+  const equityPts = d.equity || [];
+  const top = ready.slice(0, 3);
+  const quotes = (mm().markets || []).filter(x => x.quoteBid > 0 || x.quoteAsk > 0).slice(0, 5);
+  const today = new Date();
+  const dayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
+  const dayPnl = (d.accounts || []).reduce((s, a) => s + (a.totalPnl || 0), 0);
+  void dayStart;
+
+  return pageHead("OVERVIEW · 双策略确定性台", "总览",
+    "只做两类可验证的价差：NegRisk 协议层转换，与高流动性市场双边报价。没有方向性赌注。",
+    '<button class="btn btn-ghost" data-act="refresh-all">刷新</button><button class="btn btn-primary" data-act="nav" data-id="negrisk">查看篮子</button>') +
+    '<div class="grid-hero">' +
+      '<div class="card">' +
+        '<span class="eyebrow">双账户合计净值 · USDC</span>' +
+        '<div class="hero-value num">' + usd(p.equity || 0, 2) + "</div>" +
+        '<div class="hero-delta"><span class="' + (dayPnl >= 0 ? "pos" : "neg") + '">合计盈亏 ' + signedUsd(dayPnl, 2) + "</span>" +
+          "<span class=\"muted\">已实现 <b class=\"num\">" + signedUsd(p.realizedPnl || 0, 2) + "</b></span>" +
+          "<span class=\"muted\">未实现 <b class=\"num\">" + signedUsd(p.pnl || 0, 2) + "</b></span></div>" +
+        '<div class="hero-spark">' + sparkline(equityPts) + "</div>" +
+      "</div>" +
+      '<div class="card desk-card">' +
+        '<div class="desk-top"><div class="desk-title"><span class="acct-code">S1</span><b>NegRisk 转换</b></div>' +
+          '<span class="chip ' + (n?.kill ? "chip-neg" : "chip-ok") + '">' + (n?.kill ? "已熔断" : "运行中") + "</span></div>" +
+        '<div class="desk-eq num">' + usd(n?.equity || 0, 2) + "</div>" +
+        '<div class="desk-meta"><div>已锁定<b class="' + ((n?.realizedPnl || 0) >= 0 ? "pos" : "neg") + '">' + signedUsd(n?.realizedPnl || 0, 2) + "</b></div>" +
+          "<div>可转换<b>" + ready.length + " 个</b></div><div>累计转换<b>" + conversions().length + " 笔</b></div></div>" +
+        '<div class="desk-desc">' + (best ? "当前最佳：" + esc(best.title) + " · 每组成交即锁定 " + usd(best.profit, 3) : "当前没有 ΣYES买价 > 100¢ 的篮子，保持空仓。") + "</div>" +
+        '<div class="actions-row"><button class="btn btn-sm btn-primary" data-act="nav" data-id="negrisk">打开转换台</button></div>' +
+      "</div>" +
+    "</div>" +
+    '<div class="grid-hero">' +
+      '<div class="card desk-card">' +
+        '<div class="desk-top"><div class="desk-title"><span class="acct-code">S2</span><b>高流动性做市</b></div>' +
+          '<span class="chip ' + (m?.kill ? "chip-neg" : "chip-ok") + '">' + (m?.kill ? "已熔断" : "运行中") + "</span></div>" +
+        '<div class="desk-eq num">' + usd(m?.equity || 0, 2) + "</div>" +
+        '<div class="desk-meta"><div>价差收入<b class="' + ((totals.realized || 0) >= 0 ? "pos" : "neg") + '">' + signedUsd(totals.realized || 0, 2) + "</b></div>" +
+          "<div>库存盯市<b class=\"" + ((totals.unrealized || 0) >= 0 ? "pos" : "neg") + "\">" + signedUsd(totals.unrealized || 0, 2) + "</b></div>" +
+          "<div>在场报价<b>" + (totals.quoted || 0) + " 个</b></div></div>" +
+        '<div class="desk-desc">库存 ' + usd(totals.inventoryUsd || 0, 0) + " · 成交 " + (totals.fills || 0) + " 笔 · 报价名义 " + usd(totals.quoteNotional || 0, 0) + "。库存偏斜会自动压低加仓方向的报价。</div>" +
+        '<div class="actions-row"><button class="btn btn-sm btn-primary" data-act="nav" data-id="mm">打开做市台</button></div>' +
+      "</div>" +
+      '<div class="card">' +
+        '<div class="card-h"><div><span class="eyebrow">风险预算</span><h3>护栏占用</h3></div><a class="link" href="#/risk">调整</a></div>' +
+        (d.limits || []).map(l => limitCompact(l)).join("") +
+      "</div>" +
+    "</div>" +
+    '<div class="table-card"><div class="table-head"><div><span class="eyebrow">NEGRISK · READY</span><h2>可转换篮子</h2></div>' +
+      '<button class="link" data-act="nav" data-id="negrisk">全部 ' + neg().length + " 个</button></div><div class=\"table-scroll\"><table><thead><tr>" +
+      "<th>事件</th><th class=\"num-col\">结果</th><th class=\"num-col\">ΣYES 买价</th><th class=\"num-col\">篮子成本</th><th class=\"num-col\">转换卖出</th><th class=\"num-col\">每组净利</th><th class=\"num-col\">可转组数</th><th>状态</th></tr></thead><tbody>" +
+      (top.length ? top.map(o => negRow(o)).join("") : '<tr><td colspan="8"><div class="empty"><b>暂无折价篮子</b>当 ΣYES买价 > 100¢ 时，NO 篮子才会出现协议层折价。</div></td></tr>') +
+      "</tbody></table></div></div>" +
+    '<div class="table-card"><div class="table-head"><div><span class="eyebrow">MARKET MAKING · LIVE QUOTES</span><h2>在场报价</h2></div>' +
+      '<button class="link" data-act="nav" data-id="mm">做市台</button></div><div class="table-scroll"><table><thead><tr>' +
+      "<th>市场</th><th class=\"num-col\">中价</th><th class=\"num-col\">盘口价差</th><th class=\"num-col\">买价</th><th class=\"num-col\">卖价</th><th class=\"num-col\">库存</th><th class=\"num-col\">库存盈亏</th><th>状态</th></tr></thead><tbody>" +
+      (quotes.length ? quotes.map(x => mmRowCompact(x)).join("") : '<tr><td colspan="8"><div class="empty"><b>做市台尚未报价</b>自动执行开启后 6 秒内会生成双边报价。</div></td></tr>') +
+      "</tbody></table></div></div>";
+}
+
+function limitCompact(l) {
+  const ratio = l.value > 0 ? Math.min(1, l.used / l.value) : 0;
+  const cls = ratio > .9 ? "neg" : ratio > .72 ? "warn" : "";
+  const used = l.kind === "pct" ? (l.used || 0).toFixed(1) + "%" : usd(l.used || 0, 0);
+  const val = l.kind === "pct" ? l.value + "%" : usd(l.value, 0);
+  return '<div style="margin:10px 0"><div class="kv"><span>' + esc(l.name) + "</span><b>" + used + " / " + val + "</b></div>" +
+    '<div class="bar"><i class="' + cls + '" style="width:' + (ratio * 100).toFixed(1) + '%"></i></div></div>';
+}
+function negRow(o) {
+  return '<tr><td><b>' + esc(o.title) + "</b><small>" + o.n + " 个互斥结果 · 到期 " + dateShort(o.due) + "</small></td>" +
+    '<td class="num-col">' + o.n + '</td><td class="num-col">' + (o.sumYesBid * 100).toFixed(2) + "¢</td>" +
+    '<td class="num-col">' + usd(o.basketCost, 3) + '</td><td class="num-col">' + usd(o.conversionProceeds, 3) + "</td>" +
+    '<td class="num-col ' + (o.profit > 0 ? "pos" : "neg") + '"><b>' + signedUsd(o.profit, 3) + "</b><small>" + bps(o.edgeBps) + " bps</small></td>" +
+    '<td class="num-col">' + share(o.maxSets) + "</td>" +
+    '<td><span class="chip ' + (o.status === "ready" ? "chip-ok" : "chip-mute") + '">' + (o.status === "ready" ? "可转换" : "观察") + "</span></td></tr>";
+}
+function mmRowCompact(x) {
+  return "<tr><td><b>" + esc(x.title) + "</b><small>" + esc(x.category) + " · 24h " + usd(x.volume24h, 0) + "</small></td>" +
+    '<td class="num-col">' + cents(x.mid) + '</td><td class="num-col">' + Math.round(x.spreadBps) + "bps</td>" +
+    '<td class="num-col pos">' + (x.quoteBid ? cents(x.quoteBid) : "—") + '</td><td class="num-col neg">' + (x.quoteAsk ? cents(x.quoteAsk) : "—") + "</td>" +
+    '<td class="num-col">' + share(x.inventory) + '</td><td class="num-col ' + (x.unrealized >= 0 ? "pos" : "neg") + '">' + signedUsd(x.unrealized, 2) + "</td>" +
+    '<td><span class="chip ' + chipFor(x.status) + '">' + esc(x.statusText) + "</span></td></tr>";
+}
+
+/* ============================================================
+   Accounts
+   ============================================================ */
+function renderAccounts() {
+  const d = S.data;
+  const p = d.portfolio || {};
+  return pageHead("ACCOUNTS · 独立账本", "策略账户",
+    "两个账户各自持有净值、持仓、限额、规则与熔断；切换账户只改变当前操作台，不共享任何资金。",
+    '<button class="btn btn-ghost" data-act="refresh-all">刷新</button>') +
+    '<div class="kpi-strip"><div class="kpi"><span class="eyebrow">合计净值</span><b>' + usd(p.equity, 2) + '</b><small>起始 ' + usd(p.startingEquity, 0) + "</small></div>" +
+      '<div class="kpi"><span class="eyebrow">已实现</span><b class="' + ((p.realizedPnl || 0) >= 0 ? "pos" : "neg") + '">' + signedUsd(p.realizedPnl, 2) + "</b><small>两本账合计</small></div>" +
+      '<div class="kpi"><span class="eyebrow">未实现</span><b class="' + ((p.pnl || 0) >= 0 ? "pos" : "neg") + '">' + signedUsd(p.pnl, 2) + "</b><small>做市库存盯市</small></div>" +
+      '<div class="kpi"><span class="eyebrow">运行账户</span><b>' + (p.active || 0) + " / " + (p.accounts || 0) + "</b><small>未熔断且启用</small></div>" +
+      '<div class="kpi"><span class="eyebrow">资金占用</span><b>' + pct(p.usedPct || 0) + "</b><small>库存 + 转换成本</small></div></div>" +
+    '<div class="grid-two">' + d.accounts.map(accountCard).join("") + "</div>" +
+    '<div class="table-card"><div class="table-head"><div><span class="eyebrow">MATRIX</span><h2>账户矩阵</h2></div></div><div class="table-scroll"><table><thead><tr>' +
+      '<th>账户</th><th class="num-col">净值</th><th class="num-col">已实现</th><th class="num-col">未实现</th><th class="num-col">占用</th><th class="num-col">持仓/报价</th><th class="num-col">信号</th><th>状态</th></tr></thead><tbody>' +
+      d.accounts.map(a => '<tr><td><b>' + acctCode(a.id) + " · " + esc(a.name) + "</b><small>" + esc(a.short) + "</small></td>" +
+        '<td class="num-col">' + usd(a.equity, 2) + '</td><td class="num-col ' + (a.realizedPnl >= 0 ? "pos" : "neg") + '">' + signedUsd(a.realizedPnl, 2) + "</td>" +
+        '<td class="num-col ' + (a.pnl >= 0 ? "pos" : "neg") + '">' + signedUsd(a.pnl, 2) + '</td><td class="num-col">' + pct(a.usedPct || 0) + "</td>" +
+        '<td class="num-col">' + (a.positions || 0) + '</td><td class="num-col">' + (a.ready || 0) + " / " + (a.signals || 0) + "</td>" +
+        '<td><span class="chip ' + (a.kill ? "chip-neg" : !a.enabled ? "chip-mute" : a.auto ? "chip-ok" : "chip-warn") + '">' + (a.kill ? "熔断" : !a.enabled ? "停用" : a.auto ? "自动" : "手动") + "</span></td></tr>").join("") +
+      "</tbody></table></div></div>";
+}
+function accountCard(a) {
+  const isOn = a.id === S.account;
+  const used = Math.min(1, a.usedPct || 0);
+  return '<div class="card desk-card" style="' + (isOn ? "border-color:rgba(94,224,232,.55);box-shadow:0 0 0 1px rgba(94,224,232,.25) inset" : "") + '">' +
+    '<div class="desk-top"><div class="desk-title"><span class="acct-code">' + acctCode(a.id) + "</span><b>" + esc(a.name) + "</b></div>" +
+      '<span class="chip ' + (a.kill ? "chip-neg" : "chip-ok") + '">' + (a.kill ? "已熔断" : "运行中") + "</span></div>" +
+    '<div class="desk-eq num">' + usd(a.equity, 2) + "</div>" +
+    '<div class="desk-meta"><div>已实现<b class="' + (a.realizedPnl >= 0 ? "pos" : "neg") + '">' + signedUsd(a.realizedPnl, 2) + "</b></div>" +
+      "<div>未实现<b class=\"" + (a.pnl >= 0 ? "pos" : "neg") + "\">" + signedUsd(a.pnl, 2) + "</b></div>" +
+      "<div>占用<b>" + pct(a.usedPct || 0) + "</b></div></div>" +
+    '<div class="bar"><i class="' + (used > .9 ? "neg" : used > .72 ? "warn" : "") + '" style="width:' + (used * 100).toFixed(1) + '%"></i></div>' +
+    '<div class="desk-desc">' + esc(a.logic) + "</div>" +
+    '<div class="actions-row"><button class="btn btn-sm ' + (isOn ? "btn-ghost" : "btn-primary") + '" data-act="switch-account" data-id="' + a.id + '">' + (isOn ? "当前账户" : "进入账户") + "</button>" +
+      '<button class="btn btn-sm btn-ghost" data-act="toggle-auto" data-id="' + a.id + '">' + (a.auto ? "暂停自动" : "恢复自动") + "</button>" +
+      '<button class="btn btn-sm btn-danger-ghost" data-act="kill-acct" data-id="' + a.id + '">' + (a.kill ? "解除熔断" : "熔断") + "</button></div>" +
+    "</div>";
+}
+
+/* ============================================================
+   NegRisk
+   ============================================================ */
+function renderNegrisk() {
+  const rows = neg();
+  const ready = rows.filter(o => o.status === "ready");
+  const best = ready[0];
+  const totalLocked = conversions().reduce((s, c) => s + c.profit, 0);
+  return pageHead("NEGRISK · PROTOCOL ARBITRAGE", "NegRisk 转换",
+    "买入每个结果的 1 份 NO，经 Adapter 转换为其他结果的 YES，再按买价卖出。成交瞬间锁定 n × (ΣYES买价 − 1)，账本不留方向敞口。",
+    '<button class="btn btn-ghost" data-act="refresh-negrisk">刷新扫描</button><button class="btn btn-ghost" data-act="export-negrisk">导出 CSV</button>') +
+    '<div class="kpi-strip">' +
+      '<div class="kpi"><span class="eyebrow">扫描事件</span><b>' + rows.length + '</b><small>活跃 NegRisk 事件</small></div>' +
+      '<div class="kpi"><span class="eyebrow">可转换</span><b class="pos">' + ready.length + '</b><small>ΣYES买价 &gt; 100¢</small></div>' +
+      '<div class="kpi"><span class="eyebrow">最佳每组净利</span><b class="pos">' + (best ? usd(best.profit, 3) : "—") + "</b><small>" + (best ? bps(best.edgeBps) + " bps · " + best.n + " 个结果" : "无折价") + "</small></div>" +
+      '<div class="kpi"><span class="eyebrow">累计锁定</span><b class="' + (totalLocked >= 0 ? "pos" : "neg") + '">' + signedUsd(totalLocked, 2) + "</b><small>" + conversions().length + " 笔成交</small></div>" +
+      '<div class="kpi"><span class="eyebrow">账户净值</span><b>' + usd(acct("negrisk")?.equity || 0, 2) + '</b><small>起始 $10,000</small></div></div>' +
+    '<div class="table-card"><div class="table-head"><div><span class="eyebrow">BASKETS</span><h2>转换篮子</h2></div><span class="chip chip-mute">' + rows.length + " 个事件</span></div>" +
+      '<div class="table-scroll"><table><thead><tr><th>事件</th><th class="num-col">结果</th><th class="num-col">ΣYES 买价</th><th class="num-col">NO 篮子成本</th><th class="num-col">转换卖出</th><th class="num-col">每组净利</th><th class="num-col">可转组数</th><th class="num-col">到期</th><th>状态</th><th></th></tr></thead><tbody>' +
+      (rows.length ? rows.map(o => '<tr><td><b>' + esc(o.title) + "</b><small>" + esc(o.reason) + "</small></td>" +
+        '<td class="num-col">' + o.n + '</td><td class="num-col">' + (o.sumYesBid * 100).toFixed(2) + "¢</td>" +
+        '<td class="num-col">' + usd(o.basketCost, 3) + '</td><td class="num-col">' + usd(o.conversionProceeds, 3) + "</td>" +
+        '<td class="num-col ' + (o.profit > 0 ? "pos" : "neg") + '"><b>' + signedUsd(o.profit, 3) + "</b><small>" + bps(o.edgeBps) + " bps</small></td>" +
+        '<td class="num-col">' + share(o.maxSets) + "</td><td class=\"num-col\">" + dateShort(o.due) + "</td>" +
+        '<td><span class="chip ' + (o.status === "ready" ? "chip-ok" : "chip-mute") + '">' + (o.status === "ready" ? "可转换" : "观察") + "</span></td>" +
+        '<td><button class="btn btn-sm ' + (o.status === "ready" ? "btn-primary" : "btn-ghost") + '" data-act="convert" data-id="' + esc(o.id) + '" ' + (o.status === "ready" ? "" : "disabled") + ">转换</button></td></tr>").join("")
+        : '<tr><td colspan="10"><div class="empty"><b>暂无 NegRisk 事件</b>点击「刷新扫描」重新拉取 Polymarket Gamma。</div></td></tr>') +
+      "</tbody></table></div></div>" +
+    ledgerCard();
+}
+function ledgerCard() {
+  const rows = conversions();
+  return '<div class="table-card"><div class="table-head"><div><span class="eyebrow">LEDGER</span><h2>转换台账</h2></div><span class="chip chip-mute">' + rows.length + " 笔</span></div>" +
+    '<div class="table-scroll"><table><thead><tr><th>时间</th><th>事件</th><th class="num-col">组数</th><th class="num-col">篮子成本</th><th class="num-col">转换卖出</th><th class="num-col">净锁定</th><th>状态</th></tr></thead><tbody>' +
+    (rows.length ? rows.map(c => '<tr><td class="num">' + timeShort(c.createdAt) + " · " + dateShort(c.createdAt) + "</td><td><b>" + esc(c.title) + "</b><small>" + c.n + " 个结果 · " + esc(c.id) + "</small></td>" +
+      '<td class="num-col">' + share(c.sets) + '</td><td class="num-col">' + usd(c.cost, 2) + '</td><td class="num-col">' + usd(c.proceeds, 2) + "</td>" +
+      '<td class="num-col pos"><b>' + signedUsd(c.profit, 2) + "</b><small>费用 " + usd(c.fee, 2) + "</small></td>" +
+      '<td><span class="chip chip-ok">已锁定</span></td></tr>').join("")
+      : '<tr><td colspan="7"><div class="empty"><b>还没有转换成交</b>选择上方可转换篮子，输入组数后会立即锁定利润。</div></td></tr>') +
+    "</tbody></table></div></div>";
+}
+
+function openConvert(id) {
+  const o = neg().find(x => x.id === id);
+  if (!o) return;
+  const maxSets = Math.min(500, o.maxSets);
+  const defSets = Math.max(1, Math.min(100, maxSets));
+  const rows = o.outcomes.map(x => '<tr><td>' + esc(x.name) + "</td><td class=\"num-col\">" + cents(x.noAsk) + "</td><td class=\"num-col\">" + cents(x.yesBid) + "</td><td class=\"num-col\">" + (o.n - 1) + " YES</td></tr>").join("");
+  openModal({
+    eyebrow: "NEGRISK · 转换",
+    title: o.title,
+    body: '<div class="table-scroll" style="margin-bottom:12px"><table><thead><tr><th>结果</th><th class="num-col">NO 买价</th><th class="num-col">YES 卖价</th><th class="num-col">每组获得</th></tr></thead><tbody>' + rows + "</tbody></table></div>" +
+      '<div class="form-grid"><div class="field"><label>转换组数（1 组 = 每个结果 1 份 NO）</label><input id="cv-sets" type="number" min="1" max="' + maxSets + '" step="1" value="' + defSets + '"></div>' +
+      '<div class="field"><label>可转上限</label><input value="' + share(maxSets) + ' 组" disabled></div></div>' +
+      '<div class="kv"><span>篮子成本</span><b id="cv-cost">—</b></div>' +
+      '<div class="kv"><span>转换卖出收入</span><b id="cv-proceeds">—</b></div>' +
+      '<div class="kv"><span>费用 / Gas 缓冲</span><b id="cv-fee">—</b></div>' +
+      '<div class="kv total"><span>锁定净利</span><b id="cv-profit">—</b></div>' +
+      '<p class="note" style="margin-top:10px">纸上转换按当前盘口立即锁定，不发送链上交易。实盘执行需要 Polygon 钱包、USDC 授权与 NegRiskAdapter。</p>',
+    actions: [
+      { label: "取消", kind: "btn-ghost" },
+      { label: "确认转换", kind: "btn-primary", onClick: () => submitConversion(o, maxSets) }
+    ],
+    onOpen: () => {
+      const input = $("#cv-sets");
+      const recalc = () => {
+        const sets = Math.max(1, Math.min(maxSets, Math.floor(Number(input.value) || 1)));
+        const cost = o.basketCost * sets;
+        const proceeds = o.conversionProceeds * sets;
+        const fee = (cost + proceeds) * o.feeBps / 10000 + 0.02;
+        $("#cv-cost").textContent = usd(cost, 3);
+        $("#cv-proceeds").textContent = usd(proceeds, 3);
+        $("#cv-fee").textContent = usd(fee, 3);
+        $("#cv-profit").textContent = signedUsd(proceeds - cost - fee, 3);
+      };
+      input.addEventListener("input", recalc);
+      recalc();
     }
+  });
+}
+
+async function submitConversion(o, maxSets) {
+  const el = $("#cv-sets");
+  if (!el) return;
+  const sets = Math.max(1, Math.min(maxSets, Math.floor(Number(el.value) || 0)));
+  try {
+    const res = await api("/api/negrisk/convert", { method: "POST", body: { accountId: "negrisk", opportunityId: o.id, sets } });
+    toast("转换已锁定", res.conversion.sets + " 组 · 净利 " + signedUsd(res.conversion.profit, 2), "ok");
+    await loadState({ silent: true });
+  } catch (err) {
+    toast("转换被拒绝", err.message, "neg");
   }
+}
 
-  const acctById = id => app.accounts.find(a => a.id === id) || null;
-  const acctCode = id => {
-    const i = app.accounts.findIndex(a => a.id === id);
-    return i >= 0 ? "S" + (i + 1) : "S?";
-  };
-  const currentAcct = () => acctById(app.accountId) || app.accounts[0] || null;
+/* ============================================================
+   Market making
+   ============================================================ */
+function renderMm() {
+  const d = S.data;
+  const m = mm();
+  const t = m.totals || {};
+  const markets = m.markets || [];
+  const account = acct("marketmaking");
+  const halt = m.halted || account?.kill || d.settings.paperTradingEnabled === false;
+  return pageHead("MARKET MAKING · INVENTORY GAME", "做市台",
+    "在高流动性二元市场双边报价：目标价差覆盖费用，库存偏斜压低加仓方向，库存触及减仓线时只报减仓方向。",
+    '<button class="btn btn-ghost" data-act="refresh-mm">刷新报价</button><button class="btn btn-ghost" data-act="mm-params">调整参数</button><button class="btn btn-danger-ghost" data-act="flatten-all">全部平仓</button>') +
+    (halt ? '<div class="warn-box" style="margin-bottom:14px">' + (account?.kill ? "账户已熔断" : d.settings.paperTradingEnabled === false ? "模拟交易已暂停" : "做市台已停止") + "：不再生成新报价；已有库存可在下方逐市场平仓。</div>" : "") +
+    '<div class="kpi-strip">' +
+      '<div class="kpi"><span class="eyebrow">在场报价</span><b>' + (t.quoted || 0) + '</b><small>' + (m.params?.maxMarkets || 0) + " 个市场配额</small></div>" +
+      '<div class="kpi"><span class="eyebrow">库存市值</span><b>' + usd(t.inventoryUsd || 0, 2) + '</b><small>净额 ' + signedUsd(t.grossInventoryUsd || 0, 2) + "</small></div>" +
+      '<div class="kpi"><span class="eyebrow">价差收入</span><b class="' + ((t.realized || 0) >= 0 ? "pos" : "neg") + '">' + signedUsd(t.realized || 0, 2) + '</b><small>已实现 · 含减仓</small></div>' +
+      '<div class="kpi"><span class="eyebrow">库存盯市</span><b class="' + ((t.unrealized || 0) >= 0 ? "pos" : "neg") + '">' + signedUsd(t.unrealized || 0, 2) + '</b><small>未实现</small></div>' +
+      '<div class="kpi"><span class="eyebrow">成交</span><b>' + (t.fills || 0) + '</b><small>报价名义 ' + usd(t.quoteNotional || 0, 0) + "</small></div></div>" +
+    '<div class="table-card"><div class="table-head"><div><span class="eyebrow">QUOTES</span><h2>报价与库存</h2></div><span class="chip chip-mute">目标价差 ' + (m.params?.targetEdgeBps || 0) + "bps · 单边 " + usd(m.params?.quoteNotional || 0, 0) + "</span></div>" +
+      '<div class="table-scroll"><table><thead><tr><th>市场</th><th class="num-col">盘口</th><th class="num-col">价差</th><th class="num-col">我们的买价</th><th class="num-col">我们的卖价</th><th class="num-col">规模</th><th class="num-col">库存</th><th class="num-col">库存盈亏</th><th>状态</th><th></th></tr></thead><tbody>' +
+      (markets.length ? markets.map(mmRow).join("") : '<tr><td colspan="10"><div class="empty"><b>做市池为空</b>点击刷新报价，或检查 Polymarket 连接。</div></td></tr>') +
+      "</tbody></table></div></div>" +
+    '<div class="table-card"><div class="table-head"><div><span class="eyebrow">FILLS</span><h2>做市成交</h2></div><span class="chip chip-mute">' + (m.fills || []).length + " 笔</span></div>" +
+      '<div class="table-scroll"><table><thead><tr><th>时间</th><th>市场</th><th>方向</th><th class="num-col">价格</th><th class="num-col">数量</th><th class="num-col">名义</th><th class="num-col">实现盈亏</th><th class="num-col">成交后库存</th><th>类型</th></tr></thead><tbody>' +
+      ((m.fills || []).length ? m.fills.map(f => '<tr><td class="num">' + timeShort(f.createdAt) + ' · ' + dateShort(f.createdAt) + "</td><td><b>" + esc(f.title) + "</b></td>" +
+        '<td class="' + (f.side === "buy" ? "pos" : "neg") + '">' + (f.side === "buy" ? "买入" : "卖出") + '</td><td class="num-col">' + cents(f.price) + '</td><td class="num-col">' + share(f.size) + "</td>" +
+        '<td class="num-col">' + usd(f.notional, 2) + '</td><td class="num-col ' + (f.realized >= 0 ? "pos" : "neg") + '">' + signedUsd(f.realized, 3) + '</td><td class="num-col">' + share(f.inventoryAfter) + "</td>" +
+        '<td><span class="chip ' + (f.kind === "flatten" ? "chip-warn" : "chip-ok") + '">' + (f.kind === "flatten" ? "减仓" : "被动成交") + "</span></td></tr>").join("")
+        : '<tr><td colspan="9"><div class="empty"><b>还没有成交</b>报价挂在盘口内，真实 taker 打印穿过报价时才会成交。</div></td></tr>') +
+      "</tbody></table></div></div>" +
+    '<p class="note">成交回放使用 Polymarket 公共 taker tape：主动卖单打印在买价或以下才填补我们的买价，主动买单打印在卖价或以上才填补我们的卖价。演示模式使用合成打印，仅用于验收。</p>';
+}
+function mmRow(x) {
+  const canPause = x.paused;
+  return "<tr><td><b>" + esc(x.title) + "</b><small>" + esc(x.category) + " · 24h " + usd(x.volume24h, 0) + " · 流动性 " + usd(x.liquidity, 0) + "</small></td>" +
+    '<td class="num-col">' + cents(x.bestBid) + " / " + cents(x.bestAsk) + "<small>中价 " + cents(x.mid) + "</small></td>" +
+    '<td class="num-col">' + Math.round(x.spreadBps) + "bps</td>" +
+    '<td class="num-col pos">' + (x.quoteBid ? cents(x.quoteBid) : "—") + '</td><td class="num-col neg">' + (x.quoteAsk ? cents(x.quoteAsk) : "—") + "</td>" +
+    '<td class="num-col">' + share(x.quoteSize) + '</td><td class="num-col">' + share(x.inventory) + '<small>均价 ' + (x.avg ? cents(x.avg) : "—") + "</small></td>" +
+    '<td class="num-col ' + (x.unrealized >= 0 ? "pos" : "neg") + '">' + signedUsd(x.unrealized, 2) + "<small>已实现 " + signedUsd(x.realized, 2) + "</small></td>" +
+    '<td><span class="chip ' + chipFor(x.status) + '">' + esc(x.statusText) + "</span>" + (x.skewBps ? '<small>偏斜 ' + bps(x.skewBps) + "bps</small>" : "") + "</td>" +
+    '<td><div class="actions-row"><button class="btn btn-sm btn-ghost" data-act="mm-pause" data-id="' + esc(x.id) + '" data-paused="' + (!canPause) + '">' + (canPause ? "恢复" : "暂停") + "</button>" +
+      (x.inventory ? '<button class="btn btn-sm btn-danger-ghost" data-act="mm-flatten" data-id="' + esc(x.id) + '">平仓</button>' : "") + "</div></td></tr>";
+}
+function chipFor(status) {
+  return status === "quoting" ? "chip-ok" : status === "inventory" ? "chip-warn" : status === "paused" || status === "halted" ? "chip-neg" : "chip-mute";
+}
 
-  // ?debug=1 时把内部状态挂到 window 上，方便自动化验收脚本驱动倒计时、账本等场景。
-  const DEBUG = location.search.indexOf("debug=1") > -1;
-  if (DEBUG) { window.__convApp = app; window.__convStore = D; }
-
-  /* ---------------- formatting ---------------- */
-  const pad = n => String(n).padStart(2, "0");
-  const simDate = ms => new Date((ms || D.now()) + 8 * 3600000);
-  const clockStr = () => {
-    const d = simDate();
-    return pad(d.getUTCHours()) + ":" + pad(d.getUTCMinutes()) + ":" + pad(d.getUTCSeconds());
-  };
-  const dateStr = () => {
-    const d = simDate();
-    return d.getUTCFullYear() + "-" + pad(d.getUTCMonth() + 1) + "-" + pad(d.getUTCDate());
-  };
-  const dateShort = ms => {
-    const d = simDate(ms);
-    return pad(d.getUTCMonth() + 1) + "-" + pad(d.getUTCDate());
-  };
-  const dateFull = ms => {
-    const d = simDate(ms);
-    return d.getUTCFullYear() + "-" + pad(d.getUTCMonth() + 1) + "-" + pad(d.getUTCDate());
-  };
-  const weekday = () => ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][simDate().getUTCDay()];
-  const usd = (n, dp) => "$" + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: dp || 0, maximumFractionDigits: dp || 0 });
-  const signedUsd = (n, dp) => (n >= 0 ? "+" : "−") + "$" + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: dp || 0, maximumFractionDigits: dp || 0 });
-  const cents = n => (n * 100).toFixed(1) + "¢";
-  const signedCents = n => Math.abs(n) < 0.005 ? "0.00¢" : (n > 0 ? "+" : "−") + Math.abs(n).toFixed(2) + "¢";
-  const bps = n => {
-    const v = Math.round(n);
-    return v === 0 ? "0" : (v > 0 ? "+" : "−") + Math.abs(v).toLocaleString("en-US");
-  };
-  const bpsFine = n => (n >= 0 ? "+" : "−") + (Math.abs(n) >= 10 ? Math.round(Math.abs(n)) : Math.abs(n).toFixed(1));
-  const pct = (n, dp) => (n * 100).toFixed(dp == null ? 1 : dp) + "%";
-  const signedPct = (n, dp) => (n >= 0 ? "+" : "−") + Math.abs(n * 100).toFixed(dp == null ? 1 : dp) + "%";
-  const compactUsd = n => {
-    const v = Math.abs(n);
-    if (v < 1) return "$0";
-    if (v >= 1e6) return "$" + (n / 1e6).toFixed(2) + "M";
-    if (v >= 1000) return "$" + Math.round(n / 1e3) + "k";
-    return "$" + Math.round(n).toLocaleString("en-US");
-  };
-  const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-  const daysText = d => d < 1 ? Math.max(1, Math.round(d * 24)) + " 小时" : Math.round(d) + " 天";
-  const countdown = s => pad(Math.floor(s / 3600)) + ":" + pad(Math.floor((s % 3600) / 60)) + ":" + pad(Math.floor(s % 60));
-  const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
-  const startOfTradingDay = (ms) => {
-    const d = new Date((ms || D.now()) + 8 * 3600000);
-    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - 8 * 3600000;
-  };
-
-  const statusChip = d => {
-    if (app.kill && (d.status === "ready" || d.status === "active")) return '<span class="chip chip-neg">熔断中</span>';
-    if (!paperEnabled() && d.status === "ready") return '<span class="chip chip-mute">模拟暂停</span>';
-    if (d.status === "watch" && d.statusText === "结算冻结") return '<span class="chip chip-warn">结算冻结</span>';
-    if (d.status === "watch" && d.statusText === "尾部无界") return '<span class="chip chip-neg">尾部无界</span>';
-    if (d.status === "watch" && d.statusText === "临近结算") return '<span class="chip chip-warn">临近结算</span>';
-    if (d.status === "watch" && d.statusText === "场所延迟") return '<span class="chip chip-warn">场所延迟</span>';
-    if (d.status === "watch" && d.statusText === "日亏损降档") return '<span class="chip chip-neg">日亏损</span>';
-    if (!app.auto && d.status === "ready") return '<span class="chip chip-mute">待执行</span>';
-    const map = {
-      ready: '<span class="chip chip-accent">可执行</span>',
-      watch: '<span class="chip chip-mute">观察</span>',
-      review: '<span class="chip chip-warn">待复核</span>',
-      active: '<span class="chip chip-ok">执行中</span>'
-    };
-    return map[d.status] || map.watch;
-  };
-
-  const computed = () => D.events.map(e => D.derive(e));
-
-  const ruleById = id => (app.rules || []).find(r => r.id === id);
-  const ruleOn = id => ruleById(id)?.on === true;
-  const ruleVal = (id, fallback) => {
-    const r = ruleById(id);
-    return r && Number.isFinite(r.value) ? r.value : fallback;
-  };
-  const ruleUnit = id => {
-    const u = ruleById(id)?.unit;
-    return u === "days" ? "天" : u === "pct" ? "%" : u === "usd" ? "USDC" : u === "ms" ? "ms" : u === "bps" ? "bps" : u === "shares" ? "股" : u === "x" ? "x" : u === "sec" ? "秒" : u === "score" ? "/100" : "";
-  };
-
-  const COIN_ZH = [
-    ["Bitcoin Cash", "比特币现金"], ["Bitcoin", "比特币"], ["Ethereum", "以太坊"],
-    ["Solana", "Solana"], ["Dogecoin", "狗狗币"], ["Hyperliquid", "Hyperliquid"],
-    ["Chainlink", "Chainlink"], ["Avalanche", "Avalanche"], ["Cardano", "Cardano"],
-    ["Polygon", "Polygon"], ["Litecoin", "Litecoin"], ["XRP", "XRP"], ["BNB", "BNB"]
+function openMmParams() {
+  const p = mm().params || {};
+  const fields = [
+    ["target-edge", "目标半价差（bps）", p.targetEdgeBps],
+    ["min-spread", "最低盘口价差（bps）", p.minSpreadBps],
+    ["quote-size", "单边报价名义（USDC）", p.quoteNotional],
+    ["max-inventory", "单市场库存上限（USDC）", p.maxInventoryUsd],
+    ["max-markets", "同时报价市场数", p.maxMarkets],
+    ["skew", "库存偏斜强度（%）", Math.round((p.skewStrength || 0) * 100)],
+    ["flatten-pct", "减仓线（库存上限 %）", p.flattenPct]
   ];
-  const MONTH_ZH = {
-    January: "1 月", February: "2 月", March: "3 月", April: "4 月", May: "5 月", June: "6 月",
-    July: "7 月", August: "8 月", September: "9 月", October: "10 月", November: "11 月", December: "12 月"
-  };
-  function zhDateText(raw) {
-    if (!raw) return "";
-    const s = raw.trim().replace(/\s+/g, " ");
-    let m = s.match(/^([A-Za-z]+)\s+(\d{1,2})(?:,\s*(\d{4}))?$/);
-    if (m && MONTH_ZH[m[1]]) return (m[3] ? m[3] + " 年 " : "") + MONTH_ZH[m[1]] + " " + m[2] + " 日";
-    m = s.match(/^([A-Za-z]+)\s+(\d{4})$/);
-    if (m && MONTH_ZH[m[1]]) return m[2] + " 年 " + MONTH_ZH[m[1]];
-    m = s.match(/^(\d{4})$/);
-    return m ? m[1] + " 年" : s;
-  }
-  function zhSubject(raw) {
-    let s = raw.replace(/\bthe price of\b/i, "").replace(/\bprice\b/gi, "价格").trim();
-    for (const [en, zh] of COIN_ZH) s = s.replace(new RegExp("\\b" + en + "\\b", "gi"), zh);
-    s = s.replace(/\s+价格/g, "价格").replace(/价格\s+/g, "价格").replace(/\s+/g, " ").trim();
-    if (/[\u4e00-\u9fff]/.test(s)) {
-      if (!/价格/.test(s) && /^(比特币|以太坊|狗狗币|比特币现金|Solana|XRP|BNB|Hyperliquid|Chainlink|Avalanche|Cardano|Polygon|Litecoin)$/.test(s)) s += "价格";
-      return s;
+  openModal({
+    eyebrow: "MARKET MAKING · 参数",
+    title: "做市参数",
+    body: '<div class="form-grid">' + fields.map(([id, label, value]) =>
+      '<div class="field"><label>' + label + '</label><input class="mm-param" data-rule="' + id + '" type="number" step="1" value="' + esc(value) + '"></div>').join("") + "</div>" +
+      '<p class="note">参数写入该账户的规则表；保存后下一次报价周期生效。</p>',
+    actions: [
+      { label: "取消", kind: "btn-ghost" },
+      { label: "保存", kind: "btn-primary", onClick: saveMmParams }
+    ]
+  });
+}
+async function saveMmParams() {
+  const inputs = $$(".mm-param");
+  try {
+    for (const el of inputs) {
+      const value = Number(el.value);
+      if (!Number.isFinite(value)) continue;
+      await api("/api/risk/rules/" + el.dataset.rule, { method: "PATCH", body: { accountId: "marketmaking", value } });
     }
-    return null;
+    toast("参数已保存", "下一次报价周期生效。");
+    await loadState({ silent: true });
+  } catch (err) {
+    toast("保存失败", err.message, "neg");
   }
-  /** Translate the common Polymarket crypto event templates into Chinese. */
-  function translateEventTitle(title) {
-    if (!title || /[\u4e00-\u9fff]/.test(title)) return null;
-    const t = title.trim().replace(/\s+/g, " ");
-    const datePart = (prep, date) => {
-      const d = zhDateText(date);
-      if (!d) return "";
-      return prep.toLowerCase() === "by" ? "在 " + d + "前" : "在 " + d;
-    };
-    let m = t.match(/^Will the price of (.+?) be (above|over|below|under)\s+\$?([\d,.]+)(?:\s+(on|by|in)\s+(.+?))?\?$/i);
-    if (m) {
-      const subject = zhSubject(m[1] + " price");
-      if (!subject) return null;
-      return `${subject}是否${datePart(m[4] || "", m[5] || "")}${m[2].toLowerCase().match(/above|over/) ? "高于" : "低于"} $${m[3]}？`;
-    }
-    m = t.match(/^Will (.+?) (reach|hit|exceed|be above|be below|dip to|drop to|fall to|dip below|drop below|fall below|touch|close above|close below)\s+\$?([\d,.]+)\s+([A-Za-z]+)\s+(\d{1,2})\s*[-–]\s*(\d{1,2})\?$/i);
-    if (m) {
-      const subject = zhSubject(m[1]);
-      if (!subject) return null;
-      const verb = m[2].toLowerCase();
-      const verbZh = /dip to|drop to|fall to/.test(verb) ? "跌至" : /be above/.test(verb) ? "高于" : /be below/.test(verb) ? "低于" : /reach|hit/.test(verb) ? "达到" : /exceed/.test(verb) ? "超过" : /dip|drop|fall/.test(verb) ? "跌破" : /touch/.test(verb) ? "触及" : "收于";
-      const start = zhDateText(m[4] + " " + m[5]).replace(" 日", "");
-      return `${subject}是否在 ${start}–${m[6]} 日${verbZh} $${m[3]}？`;
-    }
-    m = t.match(/^Will (.+?) (be above|be below|reach|hit|exceed|dip to|drop to|fall to|dip below|drop below|fall below|touch|close above|close below)\s+\$?([\d,.]+)(?:\s+(on|by|in)\s+(.+?))?\?$/i);
-    if (m) {
-      const subject = zhSubject(m[1]);
-      if (!subject) return null;
-      const verb = m[2].toLowerCase();
-      const verbZh = /dip to|drop to|fall to/.test(verb) ? "跌至" : /be above/.test(verb) ? "高于" : /be below/.test(verb) ? "低于" : /reach|hit/.test(verb) ? "达到" : /exceed/.test(verb) ? "超过" : /dip|drop|fall/.test(verb) ? "跌破" : /touch/.test(verb) ? "触及" : /close above/.test(verb) ? "收于" : "收于";
-      const suffix = /close above/.test(verb) ? "上方" : /close below/.test(verb) ? "下方" : "";
-      return `${subject}是否${datePart(m[4] || "", m[5] || "")}${verbZh} $${m[3]}${suffix}？`;
-    }
-    return null;
+}
+
+/* ============================================================
+   Risk
+   ============================================================ */
+function renderRisk() {
+  const a = acct();
+  const d = S.data;
+  const limits = d.limits || [];
+  const rules = d.rules || [];
+  return pageHead("RISK · " + acctCode(a.id) + " " + a.name, "风控",
+    "限额与规则只作用于当前账户；熔断停止新转换与新报价，不触碰已有做市库存。",
+    '<button class="btn btn-ghost" data-act="reset-limits">恢复默认限额</button><button class="btn ' + (a.kill ? "btn-primary" : "btn-danger-ghost") + '" data-act="kill">' + (a.kill ? "解除熔断" : "触发熔断") + "</button>") +
+    '<div class="risk-grid">' +
+      riskCell("账户净值", usd(a.equity, 2), "起始 " + usd(a.startingEquity, 0)) +
+      riskCell("已实现盈亏", signedUsd(a.realizedPnl, 2), "两腿 / 转换已落账") +
+      riskCell("未实现盈亏", signedUsd(a.pnl, 2), "做市库存按中价盯市") +
+      riskCell("总占用", pct(a.usedPct || 0), "库存 + 转换成本") +
+      riskCell("当日回撤", pct((a.dailyLossPct || 0) / 100, 2), "触发日亏损降档") +
+      riskCell("熔断状态", a.kill ? "已熔断" : "正常", a.killReason || "无") +
+    "</div>" +
+    '<div class="card" style="margin-bottom:14px"><div class="card-h"><div><span class="eyebrow">LIMITS</span><h3>限额</h3></div><span class="chip chip-mute">' + limits.length + " 项</span></div>" +
+      limits.map(l => limitRow(l)).join("") + "</div>" +
+    '<div class="card" style="margin-bottom:14px"><div class="card-h"><div><span class="eyebrow">RULES</span><h3>规则与阈值</h3></div><span class="chip chip-mute">' + rules.length + " 条</span></div>" +
+      rules.map(r => ruleRow(r)).join("") + "</div>" +
+    '<div class="grid-two"><div class="card"><div class="card-h"><div><span class="eyebrow">EVENTS</span><h3>风险事件</h3></div></div>' +
+      ((d.riskEvents || []).length ? d.riskEvents.map(e => '<div class="kv"><span><b class="' + (e.level === "bad" ? "neg" : e.level === "warn" ? "warn" : "pos") + '">' + esc(e.title) + "</b><small>" + esc(e.detail) + "</small></span><b>" + esc(e.t) + "</b></div>").join("") : '<p class="note">没有风险事件。</p>') +
+      '</div><div class="card"><div class="card-h"><div><span class="eyebrow">AUDIT</span><h3>最近审计</h3></div></div>' +
+      ((d.audit || []).slice(0, 10).map(x => '<div class="kv"><span>' + esc(x.action) + " · " + esc(x.obj) + "<small>" + esc(x.detail) + "</small></span><b>" + esc(x.t) + "</b></div>").join("") || '<p class="note">没有审计记录。</p>') +
+      "</div></div>";
+}
+function riskCell(label, value, sub) {
+  return '<div class="risk-cell"><span class="eyebrow">' + esc(label) + '</span><b class="num">' + esc(value) + "</b><small>" + esc(sub) + "</small></div>";
+}
+function limitRow(l) {
+  const ratio = l.value > 0 ? Math.min(1, (l.used || 0) / l.value) : 0;
+  const used = l.kind === "pct" ? (l.used || 0).toFixed(1) + "%" : usd(l.used || 0, 0);
+  const val = l.kind === "pct" ? l.value + "%" : usd(l.value, 0);
+  return '<div class="limit-row"><div><b>' + esc(l.name) + "</b><small>" + esc(l.desc) + '</small><div class="bar"><i class="' + (ratio > .9 ? "neg" : ratio > .72 ? "warn" : "") + '" style="width:' + (ratio * 100).toFixed(1) + '%"></i></div></div>' +
+    '<span class="num">' + used + " / " + val + "</span>" +
+    '<span class="muted">' + (l.kind === "pct" ? "比例占用" : "资金占用") + "</span>" +
+    '<button class="btn btn-sm btn-ghost" data-act="edit-limit" data-id="' + esc(l.id) + '">调整</button></div>';
+}
+function ruleRow(r) {
+  return '<div class="rule-row"><div><b>' + esc(r.name) + "</b><small>" + esc(r.desc) + "</small></div>" +
+    '<span class="chip ' + (r.category === "库存管理" ? "chip-warn" : "chip-mute") + '">' + esc(r.category || "规则") + "</span>" +
+    '<input class="rule-value" type="number" min="' + (r.min ?? 0) + '" max="' + (r.max ?? 999999) + '" step="' + (r.step ?? 1) + '" value="' + esc(r.value ?? "") + '" data-rule="' + esc(r.id) + '">' +
+    '<button class="switch" data-act="rule-toggle" data-id="' + esc(r.id) + '" data-on="' + (!r.on) + '" aria-checked="' + !!r.on + '"><i></i></button>' +
+    "</div>";
+}
+
+/* ============================================================
+   Admin
+   ============================================================ */
+function renderAdmin() {
+  const d = S.data;
+  if (d.user?.role !== "admin") return pageHead("ADMIN", "管理", "仅管理员可见。", "") + '<div class="card"><p class="note">当前账号没有管理权限。</p></div>';
+  return pageHead("ADMIN · WORKSPACE", "管理", "账户、场所、审计与纸面数据重置。",
+    '<button class="btn btn-ghost" data-act="refresh-all">刷新</button><button class="btn btn-danger-ghost" data-act="admin-reset">重置纸面数据</button>') +
+    '<div class="kpi-strip"><div class="kpi"><span class="eyebrow">版本</span><b>' + esc(d.version) + "</b><small>双策略引擎</small></div>" +
+      '<div class="kpi"><span class="eyebrow">NegRisk 事件</span><b>' + neg().length + "</b><small>做市池 " + (d.engine?.universe || 0) + "</small></div>" +
+      '<div class="kpi"><span class="eyebrow">运行时长</span><b>' + Math.round((Date.now() - (d.engine?.startedAt || Date.now())) / 60000) + " 分</b><small>扫描 " + (d.engine?.scanSeq || 0) + " 次</small></div>" +
+      '<div class="kpi"><span class="eyebrow">交易模式</span><b>' + (d.engine?.tradingMode === "live" ? "实盘" : "纸面") + "</b><small>" + esc(d.engine?.marketDataMode || "") + "</small></div>" +
+      '<div class="kpi"><span class="eyebrow">用户</span><b>' + (d.user?.name ? "3" : "—") + "</b><small>管理员 / 交易员 / 只读</small></div></div>" +
+    '<div class="grid-two"><div class="card"><div class="card-h"><div><span class="eyebrow">VENUES</span><h3>场所连接</h3></div></div>' +
+      (d.venues || []).map(v => '<div class="kv"><span><b>' + esc(v.label) + "</b><small>" + esc(v.message) + "</small></span><b>" + (v.latencyMs != null ? v.latencyMs + "ms" : v.state) + "</b></div>").join("") +
+      '</div><div class="card"><div class="card-h"><div><span class="eyebrow">AUDIT</span><h3>全局审计</h3></div></div>' +
+      ((d.audit || []).slice(0, 8).map(x => '<div class="kv"><span>' + esc(x.actor) + " · " + esc(x.action) + "<small>" + esc(x.obj) + "</small></span><b>" + esc(x.t) + "</b></div>").join("") || '<p class="note">暂无审计。</p>') +
+      "</div></div>" +
+    '<div class="table-card"><div class="table-head"><div><span class="eyebrow">ACCOUNTS</span><h2>账户参数</h2></div></div><div class="table-scroll"><table><thead><tr><th>账户</th><th class="num-col">净值</th><th class="num-col">已实现</th><th class="num-col">未实现</th><th class="num-col">占用</th><th>自动</th><th>状态</th></tr></thead><tbody>' +
+      d.accounts.map(a => "<tr><td><b>" + acctCode(a.id) + " · " + esc(a.name) + "</b><small>" + esc(a.short) + "</small></td>" +
+        '<td class="num-col">' + usd(a.equity, 2) + '</td><td class="num-col">' + signedUsd(a.realizedPnl, 2) + '</td><td class="num-col">' + signedUsd(a.pnl, 2) + "</td>" +
+        '<td class="num-col">' + pct(a.usedPct || 0) + "</td><td>" + (a.auto ? "是" : "否") + "</td><td>" + (a.kill ? "熔断" : "正常") + "</td></tr>").join("") +
+      "</tbody></table></div></div>";
+}
+
+/* ============================================================
+   Actions
+   ============================================================ */
+async function switchAccount(id) {
+  if (id === S.account) { go("overview"); return; }
+  S.account = id;
+  localStorage.setItem("conv.account", id);
+  $("#acct-menu").hidden = true;
+  await loadState();
+  toast("已切换账户", acctCode(id) + " " + acct(id)?.name + " · 独立账本");
+}
+
+async function toggleAuto(id) {
+  const a = acct(id);
+  try {
+    await api("/api/risk/auto", { method: "POST", body: { accountId: id, enabled: !a.auto } });
+    toast(a.auto ? "已暂停自动执行" : "已恢复自动执行", acctCode(id) + " " + a.name, a.auto ? "warn" : "ok");
+    await loadState({ silent: true });
+  } catch (err) { toast("操作失败", err.message, "neg"); }
+}
+
+function killConfirm(id) {
+  const a = acct(id);
+  const releasing = a.kill;
+  openModal({
+    eyebrow: "RISK · " + acctCode(id),
+    title: releasing ? "解除该账户熔断？" : "熔断该账户？",
+    body: '<p class="note">' + esc(a.name) + " · 净值 " + usd(a.equity, 2) + " · 只影响该账户。</p>" +
+      (releasing ? "" : '<div class="warn-box" style="margin-top:10px">熔断会停止新转换与新报价；已有做市库存保留，需要手动平仓。</div>'),
+    actions: [
+      { label: "取消", kind: "btn-ghost" },
+      { label: releasing ? "确认解除" : "确认熔断", kind: releasing ? "btn-primary" : "btn-danger", onClick: async () => {
+        try {
+          await api("/api/risk/kill", { method: "POST", body: { accountId: id, enabled: !releasing, reason: releasing ? "人工解除" : "人工熔断" } });
+          toast(releasing ? "已解除熔断" : "已熔断", acctCode(id) + " " + a.name, releasing ? "ok" : "warn");
+          await loadState({ silent: true });
+        } catch (err) { toast("操作失败", err.message, "neg"); }
+      } }
+    ]
+  });
+}
+
+function openEditLimit(id) {
+  const l = (S.data.limits || []).find(x => x.id === id);
+  if (!l) return;
+  openModal({
+    eyebrow: "RISK · 限额",
+    title: "调整 " + l.name,
+    body: '<div class="field"><label>新上限（' + (l.kind === "pct" ? "%" : "USDC") + "）</label><input id=\"limit-value\" type=\"number\" value=\"" + esc(l.value) + "\"></div>" +
+      '<p class="note">当前占用 ' + (l.kind === "pct" ? (l.used || 0).toFixed(1) + "%" : usd(l.used || 0, 0)) + "；新上限必须高于当前占用并留出 2% 缓冲。</p>",
+    actions: [
+      { label: "取消", kind: "btn-ghost" },
+      { label: "保存", kind: "btn-primary", onClick: async () => {
+        try {
+          await api("/api/risk/limits/" + l.id, { method: "PUT", body: { accountId: S.account, value: Number($("#limit-value").value) } });
+          toast("限额已更新", l.name);
+          await loadState({ silent: true });
+        } catch (err) { toast("调整失败", err.message, "neg"); }
+      } }
+    ]
+  });
+}
+
+async function setRule(id, patch) {
+  try {
+    await api("/api/risk/rules/" + id, { method: "PATCH", body: { accountId: S.account, ...patch } });
+    await loadState({ silent: true });
+  } catch (err) { toast("规则更新失败", err.message, "neg"); }
+}
+
+/* ---------------- event delegation ---------------- */
+document.addEventListener("click", async e => {
+  const el = e.target.closest("[data-act]");
+  if (!el) {
+    if (!e.target.closest("#acct-switch")) $("#acct-menu").hidden = true;
+    return;
   }
-  function eventTitleHtml(title) {
-    const zh = app.lang === "zh" ? translateEventTitle(title) : null;
-    return '<span class="title-en">' + esc(title) + "</span>" + (zh ? '<span class="title-zh">' + esc(zh) + "</span>" : "");
-  }
-
-  /* ---------------- zh / en interface layer ----------------
-     The English layer translates the terminal shell, scanner and detail labels in place.
-     It deliberately leaves user/data content and untranslated admin prose untouched. */
-  const EN_PHRASES = {
-    "跨场所事件套利": "Cross-venue event arbitrage",
-    "Polymarket 事件合约与 Hyperliquid 永续之间的概率定价差，正在被自动收敛。": "Probability mispricing between Polymarket event contracts and Hyperliquid perps, converging automatically.",
-    "一个策略一个账户：资金、持仓、限额、规则和熔断互不共享。切换账户会切换整个操作台。": "One strategy per account: capital, positions, limits, rules and kill switches are isolated. Switching accounts switches the whole terminal.",
-    "用 Hyperliquid 波动率曲面反推数字期权价格，与 Polymarket 最优卖价比较，扣除两腿成本后排序。": "Derive digital-option fair value from the Hyperliquid vol surface, compare with Polymarket asks, then rank after two-leg costs.",
-    "合约腿成交后 800ms 内完成永续对冲；任一腿偏离计划都会被标记，超过 5 分钟交还人工。": "Hedge the perp leg within 800ms of the contract fill; any leg deviation is flagged and handed to a human after 5 minutes.",
-    "每个事件合约都配一条永续对冲腿；比例低于 90% 标黄，低于 75% 自动降仓。": "Every event contract carries a perp hedge; below 90% is amber, below 75% auto-reduces.",
-    "限额在成交前校验、成交后复核。任何一条规则触发都会降档，只有人工确认才能恢复满仓。": "Limits are checked before and after fills. Any rule trigger steps down risk; only human confirmation restores full size.",
-    "账户、用户、场所、引擎、事件、风控、审计与数据。管理与交易共用同一会话，切回终端即可继续交易。": "Accounts, users, venues, engine, events, risk, audit and data. Admin and trading share one session; return to the terminal to keep trading.",
-    "总览": "Overview", "账户": "Accounts", "机会扫描": "Scanner", "执行台": "Execution",
-    "持仓": "Positions", "风控": "Risk", "管理": "Admin",
-    "当前账户": "Current account", "自营主账户": "Prop account", "切换账户": "Switch account",
-    "引擎在线": "Engine online", "持仓同步": "Position sync", "进入管理": "Admin console",
-    "语言": "Language", "折叠菜单": "Collapse menu", "展开菜单": "Expand menu", "切换到中文": "Switch to Chinese",
-    "实时行情": "Live market", "纸面": "Paper", "实盘": "Live", "模拟暂停": "Paper paused",
-    "模拟交易": "Paper trading", "自动执行": "Auto-execute", "熔断": "Kill switch", "已熔断": "Killed",
-    "扫描暂停": "Scan paused", "纸面撮合": "Paper fills", "实盘执行": "Live execution",
-    "已接入": "Connected", "不可达": "Unavailable", "运行": "Running", "个场所已接入": "venues connected", "在线": "Online",
-    "即时扫描": "Scan now", "立即扫描": "Scan now", "刷新": "Refresh", "刷新快照": "Refresh snapshot",
-    "全部平仓": "Flatten all", "同步场所": "Sync venues", "熔断本账户": "Kill this account",
-    "只做 2–60 天事件；买入被低估的 YES，用永续空头对冲 Delta，持有到收敛或结算。": "2–60 day events; buy underpriced YES, hedge delta with a perp short, hold to convergence or settlement.",
-    "只做 2–60 天事件；买入被低估的 YES，用永续空头对冲 Delta，持有到收敛或结算。 ": "2–60 day events; buy underpriced YES, hedge delta with a perp short, hold to convergence or settlement.",
-    "已覆盖事件": "Markets covered", "通过净边阈值": "Above net-edge threshold",
-    "盘口资金": "Book liquidity", "中位净边": "Median net edge", "模型": "Model",
-    "满足条件的事件会进入自动执行队列，巨边与低置信度除外": "Qualifying events enter the auto-execution queue; fat edges and low confidence are excluded.",
-    "搜索事件、标的或来源": "Search event, underlying or source",
-    "全部": "All", "山寨币": "Altcoins", "相对价值": "Relative value",
-    "净边 ≥": "Net edge ≥", "到期": "Expiry", "仅可执行": "Executable only",
-    "列显示": "Columns", "显示": "Showing", "条": "rows", "盘口合计": "Book total",
-    "预期净边": "Expected net edge", "可横向滚动": "Scroll horizontally",
-    "点击任意行查看定价拆解与两腿计划": "Click a row to inspect pricing and the two-leg plan",
-    "事件": "Event", "PM 卖价 / HL 公允": "PM ask / HL fair", "可成交": "Liquidity",
-    "对冲腿": "Hedge", "置信度": "Confidence", "状态": "Status",
-    "可执行": "Ready", "观察": "Watch", "待复核": "Review", "执行中": "Active",
-    "结算冻结": "Settlement freeze", "场所延迟": "Venue latency", "日亏损": "Daily loss",
-    "临近结算": "Near expiry", "扫描中": "Scanning", "已暂停": "Paused",
-    "扫描雷达": "Scan radar", "扫描动画": "Radar animation", "等待扫描数据": "Waiting for scan data",
-    "个机会": "opportunities", "动画已暂停": "animation paused",
-    "可开": "open", "仓": "slots", "盘口": "Book", "做空": "Short", "做多": "Long",
-    "扫描": "Scan", "扫描节拍": "Scan cadence", "最后更新": "Last update",
-    "运行": "Running", "分钟": "min", "小时": "hours",
-    "只买公充概率 ≥ 82% 且剩余 ≤ 72 小时的合约；尾部用永续做小比例对冲。": "Buy contracts with fair probability ≥ 82% and ≤ 72h to expiry; hedge the tail with a small perp position.",
-    "只做 14 天内事件；抢陈旧卖价并立刻用永续对冲，吃报价追平前的瞬时差；持有以分钟计。": "Trade events within 14 days; lift stale asks and hedge immediately with a perp, capturing the gap before quotes catch up; hold for minutes.",
-    "只做 60 天以上事件；按 90 日已实现波动率加溢价建模，买入低估 YES 并用永续对冲。": "Trade events beyond 60 days; model with 90-day realized volatility plus a premium, buy underpriced YES and hedge with a perp.",
-    "概览": "Overview", "概念": "Overview",
-    "机会拆解": "Opportunity breakdown", "概率标尺": "Probability ruler",
-    "净边拆解": "Net edge breakdown", "两腿执行计划": "Two-leg plan",
-    "两腿情景盈亏": "Scenario P&L", "结算与模型风险": "Settlement & model risk",
-    "定价": "Pricing", "成本": "Cost", "计划": "Plan", "情景": "Scenario", "风险": "Risk",
-    "模型净期望": "Model expected", "表内最佳": "Best in table", "表内最差": "Worst in table",
-    "盈亏比 / 尾部": "P/L ratio / tail", "到期情景": "Expiry scenario",
-    "合约腿": "Contract leg", "对冲腿": "Hedge leg", "合计": "Total",
-    "建议数量": "Suggested size", "试算": "Simulate", "执行套利": "Execute",
-    "调整规则": "Adjust rules", "关闭": "Close", "行权价": "Strike", "归零": "Zero", "持平": "Flat",
-    "空头上行无上限": "Short perp has unlimited upside loss", "无上限": "Unbounded",
-    "模型净期望（按公允概率）": "Model expected (at fair probability)",
-    "限额与占用": "Limits & usage", "规则与阈值": "Rules & thresholds", "规则开关": "Rule switches",
-    "净值": "Equity", "已部署": "Deployed", "未实现": "Unrealized", "持仓 / 在途": "Positions / working",
-    "信号": "Signals", "限额占用": "Limit usage", "今日盈亏": "Today P&L",
-    "资金占用": "Capital used", "未对冲敞口": "Unhedged delta", "已实现盈亏": "Realized P&L",
-    "最大回撤": "Max drawdown", "活动机会": "Live opportunities", "净边中位数": "Median net edge",
-    "账户净值 · USDC": "Account equity · USDC", "合约腿损益": "Contract P&L", "对冲腿损益": "Hedge P&L",
-    "合计未实现": "Total unrealized", "系统状态": "System status", "执行模式": "Execution mode",
-    "扫描节拍": "Scan cadence", "报价延迟": "Quote latency", "今日成交": "Trades today", "自动执行率": "Auto-execution rate",
-    "风控护栏": "Risk guardrails", "风险预算": "Risk budget", "单场所敞口": "Venue exposure",
-    "Hyperliquid 保证金占用": "Hyperliquid margin", "组合净 Delta": "Net portfolio delta",
-    "7 日内结算敞口": "7-day settlement exposure", "单事件集中度": "Single-event concentration",
-    "机会雷达": "Opportunity radar", "查看全部机会": "View all opportunities", "净 Delta 敞口": "Net delta exposure",
-    "启动时间": "Uptime", "当前仓位": "Positions", "账户": "Accounts", "组合净值": "Portfolio equity",
-    "运行中账户": "Running accounts", "当前": "Current", "切换": "Switch", "独立账本": "Independent books",
-    "限额与占用": "Limits & usage", "规则与阈值": "Rules & thresholds", "结算风险日历": "Settlement calendar",
-    "风控事件流": "Risk event stream", "恢复默认": "Reset defaults", "熔断本账户": "Kill this account",
-    "立即扫描": "Scan now", "刷新快照": "Refresh snapshot", "导出日报": "Export daily report",
-    "全部平仓": "Flatten all", "同步场所": "Sync venues", "进行中订单": "Working orders",
-    "待接管": "Reviews", "今日成交名义": "Today's notional", "平均滑点": "Average slippage",
-    "执行台没有在跑的订单": "No working orders", "两腿都已完成或已平仓。新的套利会在扫描器里确认后出现在这里。": "Both legs are filled or flattened. New arbitrage appears here after confirmation.",
-    "总名义敞口": "Gross notional", "净 DELTA": "Net delta", "HYPERLIQUID 保证金": "Hyperliquid margin",
-    "未实现盈亏": "Unrealized P&L", "按标的敞口分布": "Exposure by underlying",
-    "按到期日资金占用": "Capital by expiry", "持仓明细": "Position detail",
-    "全部": "All", "对冲不足": "Under-hedged", "事件": "Event", "合约腿": "Contract",
-    "对冲腿": "Hedge", "对冲比例": "Hedge ratio", "到期": "Expiry",
-    "今日拦截": "Blocked today", "熔断": "Kills", "限额项": "Limits",
-    "投资组合": "Portfolio", "总权益": "Total equity", "年化": "APR",
-    "当前账户": "Current account", "自营": "Prop", "管理员": "Admin",
-    "账户规则": "Account guardrails", "对冲规则": "Hedge rules", "执行阈值": "Execution thresholds",
-    "自动执行": "Auto execution", "信号过滤": "Signal filters",
-    "日亏损降档": "Daily loss throttle", "报价延迟熔断": "Venue latency guard",
-    "结算前冻结加仓": "Settlement freeze", "巨边人工复核": "Fat-edge review",
-    "仅允许有界尾部": "Bounded tail only", "尾部风险": "Tail risk", "尾部无界": "Unbounded tail",
-    "拒绝空头永续 + 二元 YES 这类结算亏损无上限的结构；关闭后才会允许方向性尾部": "Reject structures such as short perp + binary YES with unlimited settlement loss; turn off to allow directional tails.",
-    "对冲缺口自动补足": "Auto hedge gap fill", "对冲缺口比例阈值": "Hedge gap ratio",
-    "单事件最大真实 Delta": "Max event delta", "最小合约腿数量": "Minimum contract shares",
-    "单笔最大净值占比": "Max order / equity", "人工下单盘口占比": "Manual book share",
-    "自动执行单笔净值占比": "Auto size / equity", "自动单笔名义上限": "Auto notional cap",
-    "盘口深度使用上限": "Book depth cap", "自动执行冷却": "Auto cooldown",
-    "最低置信度": "Minimum confidence", "最低盘口深度": "Minimum book depth",
-    "当日回撤达到阈值时停止开新仓，仅允许平仓与补对冲": "Stop new entries when today's drawdown reaches the threshold; only reduce or hedge.",
-    "任一场所心跳超过阈值立即暂停开仓，保留已有对冲": "Pause new entries when any venue heartbeat exceeds the threshold; keep existing hedges.",
-    "距结算小于阈值的事件只减不加；S2/S3 默认关闭，可在本账户打开": "Events inside the settlement window are reduce-only; off by default for S2/S3 but configurable per account.",
-    "毛边超过阈值时不自动执行，需人工确认以排除陈旧报价": "No auto-execution when gross edge exceeds the threshold; confirm manually to rule out stale quotes.",
-    "对冲缺口超过 max(本阈值, 目标对冲 × 比例阈值) 时自动补单": "Auto-fill when the hedge gap exceeds max(this amount, target hedge × ratio threshold).",
-    "目标对冲名义的比例阈值，与固定金额阈值取较大值": "Ratio threshold for the target hedge; the larger of this and the fixed amount is used.",
-    "事件真实 Delta 超过该倍数额度时拒绝建仓": "Reject entries when the event's true delta exceeds this multiple of face value.",
-    "低于该股数的订单直接拒绝；这是硬约束": "Reject orders below this share count; this is a hard limit.",
-    "单笔订单合约成本不得超过账户当前净值的比例": "Cap a single order's contract cost as a share of current equity.",
-    "人工执行默认使用的 Polymarket 盘口深度比例": "Share of Polymarket book depth used for manual execution.",
-    "自动引擎单笔目标成本占账户净值的比例": "Target contract cost of one auto order as a share of equity.",
-    "自动引擎单笔合约成本上限，避免高净值时单笔过大": "Absolute cap on one auto order's contract cost at higher equity.",
-    "自动订单最多使用 Polymarket 盘口深度的比例": "Maximum share of Polymarket book depth used by an auto order.",
-    "同一账户两笔自动开仓之间的最小间隔": "Minimum interval between two auto entries in the same account.",
-    "信号置信度低于该分数时只观察，不进入可执行队列": "Signals below this confidence stay in watch mode, not the executable queue.",
-    "Polymarket 可成交深度低于该金额时只观察": "Markets with less executable Polymarket depth stay in watch mode.",
-    "硬约束": "Hard limit", "恢复默认": "Reset defaults", "全部平仓": "Flatten all",
-    "进行中": "Working", "待接管": "Reviews", "审计日志": "Audit log",
-    "概念": "Overview", "用户与权限": "Users & roles", "策略账户": "Strategy accounts",
-    "场所连接": "Venues", "策略与引擎": "Strategy & engine", "事件目录": "Event catalog",
-    "风控配置": "Risk config", "数据与导出": "Data & export",
-    "概率偏差": "Probability edge", "结算收敛": "Convergence", "报价滞后": "Quote lag", "长端波动率": "Long vol",
-    "BTC 价格": "BTC price", "ETH 价格": "ETH price",
-    "今天": "Today", "今日": "Today", "昨天": "Yesterday",
-    "股": "shares", "天": "days", "小时": "hours", "分钟": "min", "条腿": "legs",
-    "个事件": "events", "次": "times", "后结算": "to expiry"
-  };
-  const EN_KEYS = Object.keys(EN_PHRASES).sort((a, b) => b.length - a.length);
-  function translatePhrase(text) {
-    if (!text || !/[\u4e00-\u9fff]/.test(text)) return text;
-    let out = text;
-    for (const zh of EN_KEYS) out = out.split(zh).join(EN_PHRASES[zh]);
-    out = out.replace(/\b(\d+) (days|hours|slots|shares|events|minutes)\b/gi, (_, n, unit) =>
-      n + " " + (Number(n) === 1 ? unit.replace(/s$/i, "") : unit));
-    return out;
-  }
-  let applyingLang = false;
-  let langScheduled = false;
-  function applyLang() {
-    if (app.lang !== "en" || applyingLang) return;
-    applyingLang = true;
-    try {
-      const root = document.querySelector(".app") || document.body;
-      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-        acceptNode(node) {
-          const p = node.parentElement;
-          if (!p || /^(SCRIPT|STYLE|TEXTAREA)$/.test(p.tagName)) return NodeFilter.FILTER_REJECT;
-          if (p.closest(".title-zh, [data-no-i18n]")) return NodeFilter.FILTER_REJECT;
-          return /[\u4e00-\u9fff]/.test(node.nodeValue || "") ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
-        }
-      });
-      const nodes = [];
-      while (walker.nextNode()) nodes.push(walker.currentNode);
-      for (const node of nodes) {
-        const translated = translatePhrase(node.nodeValue);
-        if (translated !== node.nodeValue) node.nodeValue = translated;
-      }
-      document.querySelectorAll("[placeholder],[title],[aria-label]").forEach(el => {
-        if (el.closest("[data-no-i18n]")) return;
-        for (const attr of ["placeholder", "title", "aria-label"]) {
-          const value = el.getAttribute(attr);
-          if (value && /[\u4e00-\u9fff]/.test(value)) el.setAttribute(attr, translatePhrase(value));
-        }
-      });
-    } finally {
-      applyingLang = false;
-    }
-  }
-  function scheduleLang() {
-    if (app.lang !== "en" || langScheduled) return;
-    langScheduled = true;
-    setTimeout(() => { langScheduled = false; applyLang(); }, 60);
-  }
-  function startLangObserver() {
-    if (app.lang !== "en") return;
-    new MutationObserver(scheduleLang).observe(document.body, { childList: true, subtree: true, characterData: true });
-    scheduleLang();
-  }
-  function setLanguage(lang) {
-    localStorage.setItem("conv.lang", lang);
-    location.reload();
-  }
-  function syncLangButtons() {
-    document.documentElement.lang = app.lang === "en" ? "en" : "zh-CN";
-    $$("#rail-tools [data-lang]").forEach(b => b.classList.toggle("is-on", b.dataset.lang === app.lang));
-    const mobile = $("#lang-mobile");
-    if (mobile) {
-      mobile.textContent = app.lang === "en" ? "中" : "EN";
-      mobile.title = app.lang === "en" ? "切换到中文" : "Switch to English";
-    }
-    const collapse = $("#rail-collapse");
-    if (collapse) collapse.title = app.railCollapsed ? "展开菜单" : "折叠菜单";
-  }
-
-  function book() { return D.book(); }
-
-  /* ---------------- audit trail ----------------
-     操作台里的每个动作都要在审计流里留痕，否则"审计日志"只是一段静态样例。
-  */
-  function logAudit() {
-    // Audit entries are written by the server; the next state push re-renders them.
-  }
-
-  /* ---------------- focus containment ---------------- */
-  const FOCUSABLE = 'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
-
-  function trapFocus(root, restoreTo) {
-    const onKey = e => {
-      if (e.key !== "Tab" || !root) return;
-      const items = $$(FOCUSABLE, root).filter(el => el.offsetWidth || el.offsetHeight || el === document.activeElement);
-      if (!items.length) return;
-      const first = items[0], last = items[items.length - 1];
-      if (e.shiftKey && (document.activeElement === first || !root.contains(document.activeElement))) {
-        e.preventDefault(); last.focus();
-      } else if (!e.shiftKey && (document.activeElement === last || !root.contains(document.activeElement))) {
-        e.preventDefault(); first.focus();
-      }
-    };
-    root.addEventListener("keydown", onKey);
-    return () => {
-      root.removeEventListener("keydown", onKey);
-      if (restoreTo && restoreTo.focus && document.contains(restoreTo)) restoreTo.focus();
-    };
-  }
-
-  /* ---------------- system state ---------------- */
-  function paperEnabled() {
-    return !D.engine || D.engine.paperTradingEnabled !== false;
-  }
-
-  function updateSystem() {
-    const banner = $("#global-banner");
-    const killBtn = $("#kill-btn");
-    const sw = $("#auto-switch");
-    const acct = currentAcct();
-    const acctLabel = acct ? acctCode(acct.id) + " " + acct.name : "当前账户";
-    const sim = paperEnabled();
-
-    if (app.kill) {
-      banner.hidden = false;
-      banner.classList.add("is-kill");
-      $("#banner-title").textContent = acctLabel + " 已熔断";
-      $("#banner-text").textContent = "该账户的新开仓与对冲腿已暂停，其他账户不受影响。";
-      $("#banner-action").textContent = "去解除";
-      killBtn.classList.add("is-armed");
-      killBtn.querySelector("span").textContent = "已熔断";
-    } else if (!sim) {
-      banner.hidden = false;
-      banner.classList.remove("is-kill");
-      $("#banner-title").textContent = "模拟交易已暂停";
-      $("#banner-text").textContent = "新开仓已暂停；已有持仓仍可平仓与对齐。到执行台开启模拟交易。";
-      $("#banner-action").textContent = "去执行台";
-      killBtn.classList.remove("is-armed");
-      killBtn.querySelector("span").textContent = "熔断";
-    } else if (!app.auto) {
-      banner.hidden = false;
-      banner.classList.remove("is-kill");
-      $("#banner-title").textContent = acctLabel + " 自动执行已暂停";
-      $("#banner-text").textContent = "该账户的扫描与监控继续运行，信号只推送不执行。";
-      $("#banner-action").textContent = "查看执行台";
-      killBtn.classList.remove("is-armed");
-      killBtn.querySelector("span").textContent = "熔断";
-    } else {
-      banner.hidden = true;
-      banner.classList.remove("is-kill");
-      killBtn.classList.remove("is-armed");
-      killBtn.querySelector("span").textContent = "熔断";
-    }
-
-    sw.setAttribute("aria-checked", String(app.auto));
-    sw.disabled = app.kill || (acct ? !acct.enabled : false);
-    if (sw.parentElement.querySelector(".auto-label")) {
-      sw.parentElement.querySelector(".auto-label").textContent = app.kill ? "已停止" : "自动执行";
-    }
-    const simSw = $("#sim-switch");
-    if (simSw) {
-      simSw.setAttribute("aria-checked", String(sim));
-      simSw.disabled = !D.user || D.user.role === "analyst";
-    }
-    const simToggle = $("#sim-toggle");
-    if (simToggle) simToggle.classList.toggle("is-off", !sim);
-    const simLabel = $("#sim-label");
-    if (simLabel) simLabel.textContent = sim ? "模拟交易" : "模拟暂停";
-    const simMini = $("#sim-mini");
-    if (simMini) simMini.textContent = sim ? "模拟" : "暂停";
-    const strip = $("#sim-strip");
-    if (strip) {
-      strip.classList.toggle("is-off", !sim);
-      const stripTitle = $("#sim-strip-title");
-      const stripText = $("#sim-strip-text");
-      const stripBtn = $("#sim-strip-btn");
-      if (stripTitle) stripTitle.textContent = sim ? "模拟交易进行中" : "模拟交易已暂停";
-      if (stripText) stripText.textContent = sim
-        ? "新订单按真实 Polymarket / Hyperliquid 盘口仿真成交，可在「持仓」查看盈亏。"
-        : "新开仓已暂停；已有持仓仍可平仓与对齐。开启后按真实盘口继续仿真成交。";
-      if (stripBtn) stripBtn.textContent = sim ? "暂停模拟" : "开启模拟";
-    }
-    killBtn.disabled = acct ? !acct.enabled : false;
-
-    $("#sys-mode").textContent = app.kill ? "已熔断 · 人工接管" : !sim ? "模拟暂停 · 仅平仓" : app.auto ? "全自动 · 可接管" : "暂停执行 · 仅监控";
-    $("#sys-mode").className = app.kill ? "neg" : !sim || !app.auto ? "warn" : "ok";
-    const chip = $("#sys-chip");
-    chip.className = "chip " + (app.kill ? "chip-neg" : !sim || !app.auto ? "chip-warn" : "chip-ok");
-    chip.innerHTML = '<span class="dot ' + (app.kill ? "bad" : !sim || !app.auto ? "warn" : "ok") + '"></span>' + (app.kill ? "已熔断" : !sim ? "模拟暂停" : app.auto ? "全部正常" : "自动执行暂停");
-
-    $("#risk-state").innerHTML = '<span class="dot ' + (app.kill ? "bad" : "ok") + '"></span>' +
-      (app.kill ? "本账户已熔断 · 等待人工解除" : "本账户正常 · 独立护栏");
-    $("#risk-state").className = "risk-state" + (app.kill ? " neg" : "");
-
-    const kp = $("#kill-panel");
-    kp.classList.toggle("is-killed", app.kill);
-    $("#kp-title").textContent = app.kill ? "本账户交易已停止" : "本账户护栏已启用";
-    $("#kp-desc").textContent = app.kill
-      ? "本账户的新开仓、补对冲、自动降档全部停止；持仓保留在场。其他账户继续按各自规则运行。"
-      : "限额、规则与熔断只作用于本账户（" + acctLabel + "）；下单前逐笔校验，不与其他账户共享。";
-    $("#kp-count").textContent = app.kill ? "1" : "0";
-    const pageKill = $("#kill-page-btn");
-    pageKill.innerHTML = app.kill
-      ? '<svg class="ic"><use href="#i-check"/></svg>解除本账户熔断'
-      : '<svg class="ic"><use href="#i-power"/></svg>熔断本账户';
-    pageKill.className = "btn " + (app.kill ? "btn-primary" : "btn-danger-ghost");
-
-    $("#nav-risk-dot").className = "dot " + (app.kill ? "bad" : "ok") + " nav-dot";
-  }
-
-  function guard() {
-    if (app.kill) { toast("已熔断", "请先在风控页解除熔断，再执行新的套利。", "neg"); return false; }
-    return true;
-  }
-
-  /* ---------------- toast / modal ---------------- */
-  function toast(title, msg, kind, actionLabel, actionFn) {
-    const box = $("#toasts");
-    const el = document.createElement("div");
-    el.className = "toast " + (kind && kind !== "ok" ? kind : "");
-    const icon = kind === "neg" || kind === "warn" ? "alert" : "check";
-    el.innerHTML =
-      '<svg class="ic"><use href="#i-' + icon + '"/></svg>' +
-      '<div class="toast-body"><b>' + esc(title) + "</b><span>" + esc(msg) + "</span></div>" +
-      (actionLabel ? '<button class="mini-btn" data-taction>' + esc(actionLabel) + "</button>" : "") +
-      '<button class="toast-x" aria-label="关闭通知"><svg class="ic"><use href="#i-x"/></svg></button>';
-    const close = () => { el.classList.add("is-out"); setTimeout(() => el.remove(), 200); };
-    el.querySelector(".toast-x").addEventListener("click", close);
-    if (actionLabel) {
-      el.querySelector("[data-taction]").addEventListener("click", () => { close(); if (actionFn) actionFn(); });
-    }
-    box.appendChild(el);
-    if (box.children.length > 3) box.firstElementChild.remove();
-    setTimeout(close, 5600);
-  }
-
-  let modalCloser = null;
-  let drawerUntrap = null;
-
-  function openModal(opts) {
-    const root = $("#modal-root");
-    const actions = opts.actions || [{ label: "关闭", kind: "btn-ghost" }];
-    $("#modal").innerHTML =
-      '<div class="modal-h"><div class="modal-title" id="modal-title">' + esc(opts.title) + "</div>" +
-      (opts.sub ? '<div class="modal-sub">' + opts.sub + "</div>" : "") + "</div>" +
-      '<div class="modal-b">' + (opts.body || "") + "</div>" +
-      '<div class="modal-f">' + actions.map((a, i) =>
-        '<button class="btn ' + (a.kind || "btn-ghost") + '" data-act="' + i + '"' + (a.disabled ? " disabled" : "") + ">" + a.label + "</button>"
-      ).join("") + "</div>";
-
-    root.hidden = false;
-    const prevFocus = document.activeElement;
-    const untrap = trapFocus($("#modal"), prevFocus);
-
-    $$("[data-act]", $("#modal")).forEach(btn => {
-      btn.addEventListener("click", () => {
-        const act = actions[Number(btn.dataset.act)];
-        if (!act) return;
-        if (act.onClick) {
-          const keep = act.onClick();
-          if (keep === false) return;
-        }
-        closeModal();
-        if (act.after) act.after();
-      });
-    });
-
-    const first = $("#modal .modal-f .btn") || $("#modal button");
-    if (first) first.focus();
-
-    modalCloser = () => {
-      root.hidden = true;
-      modalCloser = null;
-      untrap();
-    };
-    if (opts.onMount) opts.onMount($("#modal"));
-  }
-
-  function closeModal() { if (modalCloser) modalCloser(); }
-
-  /* ---------------- drawer ---------------- */
-  function openDrawer(id) {
-    const ev = D.event(id);
-    if (!ev) return;
-    const d = D.derive(ev);
-    app.sel = id;
-    const prevFocus = document.activeElement;
-
-    const manualDepthPct = ruleOn("manual-depth-pct") ? ruleVal("manual-depth-pct", 65) : 100;
-    const maxOrderPct = ruleOn("max-order-pct") ? ruleVal("max-order-pct", 25) : 100;
-    const minQty = ruleVal("min-qty", 100);
-    const limitById = id => app.limits.find(l => l.id === id);
-    const concLimit = limitById("conc");
-    const pmLimit = limitById("pm");
-    const settleLimit = limitById("settle");
-    const hlLimit = limitById("hl");
-    const maxByDepth = Math.floor(d.depth * manualDepthPct / 100 / d.ask / 100) * 100;
-    const maxByEquity = Math.floor(D.equityNow * maxOrderPct / 100 / d.ask / 100) * 100;
-    const maxByConc = concLimit ? Math.floor(D.equityNow * concLimit.value / 100 / d.ask / 100) * 100 : Infinity;
-    const maxByPm = pmLimit ? Math.floor(Math.max(0, pmLimit.value - pmLimit.used) / d.ask / 100) * 100 : Infinity;
-    const maxBySettle = settleLimit && d.days <= 7 ? Math.floor(Math.max(0, settleLimit.value - settleLimit.used) / d.ask / 100) * 100 : Infinity;
-    const maxByHl = hlLimit && Math.abs(d.delta) > 0
-      ? Math.floor(Math.max(0, hlLimit.value - hlLimit.used) * 4.8 / Math.abs(d.delta) / 100) * 100
-      : Infinity;
-    const maxByLimits = Math.min(maxByConc, maxByPm, maxBySettle, maxByHl);
-    const executableMax = Math.min(maxByDepth, maxByEquity, maxByLimits);
-    const qty = Math.max(minQty, executableMax);
-    const sizeBlocked = executableMax < minQty;
-    const planProfit = qty * d.net / 100;
-    // Every hard blocker is shown here with its live threshold; nothing is hidden behind a fixed constant.
-    const settleDays = ruleVal("settle-freeze", 2);
-    const settleBlocked = ruleOn("settle-freeze") && d.days < settleDays;
-    const maxDelta = ruleOn("max-delta") ? ruleVal("max-delta", 25) : Infinity;
-    const deltaBlocked = Math.abs(d.delta) > maxDelta;
-    const statusBlocked = d.status === "watch";
-    const tailBlocked = d.kind !== "complete" && ruleOn("bounded-tail") && d.delta > 0;
-    const canExecute = !app.kill && paperEnabled() && d.net > 0 && !statusBlocked && !settleBlocked && !deltaBlocked && !sizeBlocked && !tailBlocked;
-    const costs = [
-      ["PM 点差", d.spreadBps],
-      ["HL 手续费", d.feeBps],
-      ["对冲滑点", d.slipBps],
-      ["资金费率", d.fundingBps],
-      ["结算缓冲", d.resBps]
-    ];
-    const costTotal = costs.reduce((s, c) => s + c[1], 0);
-    const costSheen = i => 0.72 - i * 0.11;
-    const costStack = costs.map((c, i) =>
-      '<i style="width:' + (c[1] / costTotal * 100).toFixed(1) + "%;background:oklch(0.695 0.168 25 / " + costSheen(i).toFixed(2) + ')" title="' + c[0] + " " + Math.round(c[1]) + ' bps"></i>'
-    ).join("");
-
-    // 公允价可能低于卖价（负毛边）：区间要按两端包住，不能假设 fair 一定在右。
-    const zoneNeg = d.fair < d.ask;
-    const zoneLeft = Math.min(d.ask, d.fair) * 100;
-    const zoneWidth = Math.max(0.4, Math.abs(d.fair - d.ask) * 100);
-    const costShare = d.grossBps > 0 ? (costTotal / d.grossBps * 100).toFixed(1) + "%" : "—";
-    const netShare = d.gross > 0 ? clamp(d.net / d.gross * 100, 0, 100) : 0;
-
-    // Scenario P&L for the suggested two-leg size. Settlement is binary; the perp is marked at the same terminal spot.
-    const model = d.model;
-    const spot0 = D.market[d.und]?.px ?? model?.spot ?? 0;
-    const strike = model?.strike ?? 0;
-    const hedgeNotional = qty * Math.abs(d.delta);
-    const hedgeShort = d.delta >= 0;
-    const scenarioRows = [];
-    if (spot0 > 0 && strike > 0) {
-      const candidates = [-50, -20, -10, -5, 0, 5, 10, 20, 50, 100].map(pct => ({ spot: spot0 * (1 + pct / 100), pct }));
-      candidates.push({ spot: 0, pct: -100 });
-      if (Math.abs(strike / spot0 - 1) <= 0.6) {
-        candidates.push({ spot: strike, pct: (strike / spot0 - 1) * 100, strike: true });
-        candidates.push({ spot: strike * (1 - 1e-6), pct: (strike / spot0 - 1) * 100, strike: true, below: true });
-        candidates.push({ spot: strike * (1 + 1e-6), pct: (strike / spot0 - 1) * 100, strike: true, above: true });
-      }
-      const seenSpots = new Set();
-      for (const c of candidates.sort((a, z) => a.spot - z.spot)) {
-        const key = Math.round(c.spot * 100) / 100;
-        if (seenSpots.has(key)) continue;
-        seenSpots.add(key);
-        const yes = model.direction === 1 ? c.spot >= strike : c.spot <= strike;
-        const contractPnl = qty * (yes ? 1 : 0) - qty * d.ask;
-        const hedgePnl = hedgeNotional * ((hedgeShort ? spot0 - c.spot : c.spot - spot0) / spot0);
-        const total = contractPnl + hedgePnl;
-        const nearStrike = Math.abs(c.spot / strike - 1) < 0.002;
-        const label = nearStrike ? "行权价" : c.spot === 0 ? "归零" : Math.abs(c.pct) < 0.05 ? "持平" : (c.pct > 0 ? "+" : "") + c.pct.toFixed(0) + "%";
-        scenarioRows.push({ spot: c.spot, label, yes, contractPnl, hedgePnl, total, pct: total / Math.max(1, D.equityNow) * 100 });
-      }
-    }
-    const best = scenarioRows.reduce((a, r) => !a || r.total > a.total ? r : a, null);
-    const worst = scenarioRows.reduce((a, r) => !a || r.total < a.total ? r : a, null);
-    const expectedPnl = qty * d.net / 100;
-    const tailUnbounded = hedgeShort; // short perp loses without bound as the terminal spot rises
-    const rr = best && worst && worst.total < 0 ? best.total / Math.abs(worst.total) : null;
-    const scenarioHtml = !scenarioRows.length
-      ? '<section class="dsection" id="dsec-scenario"><div class="dsection-h"><span class="eyebrow">两腿情景盈亏</span><small>—</small></div>' +
-        '<p class="scenario-note">缺少行权价或标的价，无法生成情景表；计划本身仍可执行。</p></section>'
-      : '<section class="dsection" id="dsec-scenario">' +
-          '<div class="dsection-h"><span class="eyebrow">两腿情景盈亏</span><small>' + qty.toLocaleString("en-US") + " 股 · 到期结算</small></div>" +
-          '<div class="scenario-summary">' +
-            '<div><span>模型净期望</span><b class="' + (expectedPnl >= 0 ? "pos" : "neg") + '">' + signedUsd(expectedPnl, 0) + "</b><small>公允概率 " + (d.fair * 100).toFixed(1) + "%</small></div>" +
-            '<div><span>表内最佳</span><b class="pos">' + (best ? signedUsd(best.total, 0) : "—") + "</b><small>" + (best ? best.label : "—") + "</small></div>" +
-            '<div><span>表内最差</span><b class="neg">' + (worst ? signedUsd(worst.total, 0) : "—") + "</b><small>" + (worst ? worst.label : "—") + "</small></div>" +
-            '<div><span>盈亏比' + (rr != null ? " / 尾部" : "") + "</span><b class=\"" + (tailUnbounded || (rr != null && rr < 0.5) ? "neg" : "pos") + '">' + (tailUnbounded ? "−∞" : rr != null ? rr.toFixed(2) + "x" : "—") + "</b><small>" + (tailUnbounded ? "空头上行无上限" : rr != null ? "最佳 / 表内最差" : "—") + "</small></div>" +
-          "</div>" +
-          '<div class="scenario-table"><div class="sc-row head"><span>到期情景</span><span>合约腿</span><span>对冲腿</span><span>合计</span></div>' +
-            scenarioRows.map(r =>
-              '<div class="sc-row">' +
-                '<span class="sc-k"><span class="chip ' + (r.yes ? "chip-accent" : "chip-mute") + '">' + (r.yes ? "YES" : "NO") + "</span><b>" + r.label + "</b><small>" + usd(r.spot, 0) + "</small></span>" +
-                '<span class="sc-num ' + (r.contractPnl >= 0 ? "pos" : "neg") + '">' + signedUsd(r.contractPnl, 0) + "</span>" +
-                '<span class="sc-num ' + (r.hedgePnl >= 0 ? "pos" : "neg") + '">' + signedUsd(r.hedgePnl, 0) + "</span>" +
-                '<span class="sc-total"><b class="' + (r.total >= 0 ? "pos" : "neg") + '">' + signedUsd(r.total, 0) + "</b><small>" + (r.pct >= 0 ? "+" : "") + r.pct.toFixed(2) + "%</small></span>" +
-              "</div>"
-            ).join("") +
-            (tailUnbounded ? '<div class="sc-row"><span class="sc-k"><span class="chip chip-neg">TAIL</span><b>S → ∞</b><small>无上限</small></span><span class="sc-num">—</span><span class="sc-num neg">−∞</span><span class="sc-total"><b class="neg">−∞</b><small>空头亏损不封顶</small></span></div>' : "") +
-          "</div>" +
-          '<p class="scenario-note">' + (tailUnbounded
-            ? '<b class="neg">该结构卖出上行尾部：标的越涨，永续空头亏损越大，理论上没有上限。</b> 这不是结算保本套利；只有用看涨期权/价差封顶后才能把最大亏损变成有限值。'
-            : "对冲腿为做多永续，上行方向收益不封顶；最大亏损出现在标的归零。") +
-          " 按建议数量 " + qty.toLocaleString("en-US") + " 股：合约腿到期按 0/1 结算，对冲腿按到期标的价平仓；不含资金费与平仓滑点（已计入净边成本）。建议数量已按盘口占比、单笔净值、集中度、场所/结算/HL 限额取最小值。" +
-          (model.kind === "touch" ? " 触碰型为路径依赖，表中按到期价是否越过行权价近似。" : "") + "</p>" +
-        "</section>";
-
-    $("#drawer").innerHTML =
-      '<div class="drawer-h">' +
-        '<div class="drawer-h-top">' +
-          '<div class="eyebrow">机会拆解 · ' + esc(d.cat) + "</div>" +
-          '<button class="x-btn" data-close-drawer aria-label="关闭"><svg class="ic"><use href="#i-x"/></svg></button>' +
-        "</div>" +
-        '<h2 class="drawer-title" id="drawer-title">' + eventTitleHtml(d.title) + "</h2>" +
-        '<div class="drawer-meta">' + statusChip(d) +
-          '<span class="chip">' + esc(d.und) + " 永续对冲</span>" +
-          "<span class=\"muted\" style=\"font-size:10.5px\">" + daysText(d.days) + "后结算 · " + esc(d.src) + "</span>" +
-        "</div>" +
-      "</div>" +
-      '<div class="drawer-b">' +
-        '<div class="drawer-tabs" id="drawer-tabs" role="tablist" aria-label="机会拆解章节">' +
-          '<button class="drawer-tab is-on" data-drawer-goto="price">定价</button>' +
-          '<button class="drawer-tab" data-drawer-goto="cost">成本</button>' +
-          '<button class="drawer-tab" data-drawer-goto="plan">计划</button>' +
-          '<button class="drawer-tab" data-drawer-goto="scenario">情景</button>' +
-          '<button class="drawer-tab" data-drawer-goto="risk">风险</button>' +
-        "</div>" +
-
-        '<section class="dsection" id="dsec-price">' +
-          '<div class="dsection-h"><span class="eyebrow">概率标尺</span><small>市场卖价 vs HL 公允 · 0–100¢</small></div>' +
-          '<div class="ruler">' +
-            '<div class="ruler-track"></div>' +
-            '<div class="ruler-zone' + (zoneNeg ? " is-neg" : "") + '" style="left:' + zoneLeft.toFixed(2) + "%;width:" + zoneWidth.toFixed(2) + '%"></div>' +
-            '<div class="ruler-mark is-fair" style="left:' + (d.fair * 100) + '%"><i></i><span>公允 ' + cents(d.fair) + "</span></div>" +
-            '<div class="ruler-mark is-ask" style="left:' + (d.ask * 100) + '%"><i></i><span>卖价 ' + cents(d.ask) + "</span></div>" +
-            '<div class="ruler-axis"><span>0</span><span>25</span><span>50</span><span>75</span><span>100</span></div>' +
-          "</div>" +
-          '<div class="price-cols">' +
-            '<div class="price-col"><span>PM 最优买价</span><b>' + cents(d.bid) + "</b></div>" +
-            '<div class="price-col"><span>PM 最优卖价</span><b>' + cents(d.ask) + "</b></div>" +
-            '<div class="price-col is-fair"><span>HL 隐含公允</span><b>' + cents(d.fair) + "</b></div>" +
-          "</div>" +
-        "</section>" +
-
-        '<section class="dsection" id="dsec-cost">' +
-          '<div class="dsection-h"><span class="eyebrow">净边拆解</span><small>单位 bps · 相对合约面值</small></div>' +
-          '<div class="decomp">' +
-            '<div class="dc-row"><span class="dc-k">毛概率差</span><span class="dc-bar"><i style="width:100%"></i></span>' +
-              '<span class="dc-v">' + bps(d.grossBps) + '</span><span class="dc-share">100%</span></div>' +
-            '<div class="dc-cost">' +
-              '<div class="dc-cost-h"><span>两腿成本</span><b>' + bps(-costTotal) + " bps</b><em>占毛边 " + costShare + "</em></div>" +
-              '<div class="dc-stack">' + costStack + "</div>" +
-              '<ul class="dc-legend">' + costs.map((c, i) => {
-                const share = c[1] / costTotal * 100;
-                return '<li><i style="background:oklch(0.695 0.168 25 / ' + costSheen(i).toFixed(2) + ')"></i><span>' + c[0] +
-                  "</span><b>" + bpsFine(-c[1]) + "</b><em>" + (share < 2 ? share.toFixed(1) : Math.round(share)) + "%</em></li>";
-              }).join("") +
-              "</ul>" +
-            "</div>" +
-            '<div class="dc-row total"><span class="dc-k">净边</span>' +
-              '<span class="dc-bar"><i style="width:' + Math.max(2, netShare) + '%"></i></span>' +
-              '<span class="dc-v">' + bps(d.netBps) + '</span><span class="dc-share">' + Math.round(netShare) + "%</span></div>" +
-          "</div>" +
-          '<p class="note" style="margin-top:10px"><svg class="ic"><use href="#i-bolt"/></svg><span>' +
-            (d.net > 0
-              ? "净边 " + signedCents(d.net) + "，按卖价计的持有期回报 " + pct(d.holdReturn, 1) +
-                "，持有 " + daysText(d.days) + " 的简单年化 " + (d.annualized > 999 ? ">999%" : Math.round(d.annualized) + "%") + "。"
-              : "净边 " + signedCents(d.net) + "，扣除两腿成本后没有可用收益，只保留在观察列表。") +
-            " 成本按两腿同时成交估算。</span></p>" +
-        "</section>" +
-
-        '<section class="dsection" id="dsec-plan">' +
-          '<div class="dsection-h"><span class="eyebrow">两腿执行计划</span><small>' + qty.toLocaleString("en-US") + " 股 · 盘口 " + manualDepthPct + "% / 净值 " + maxOrderPct + "% / 限额取最小</small></div>" +
-          '<div class="plan">' +
-            '<div class="plan-leg">' +
-              '<div class="plan-src"><b>POLYMARKET</b><span>合约腿</span></div>' +
-              '<div class="plan-mid"><b>买入 YES · ' + qty.toLocaleString("en-US") + " 股</b><span>" + cents(d.ask) + " · 成本 " + usd(qty * d.ask, 2) + "</span></div>" +
-              '<div class="plan-num"><b>' + usd(qty * d.ask, 0) + "</b><span>最大损失</span></div>" +
-            "</div>" +
-            '<div class="plan-leg">' +
-              '<div class="plan-src"><b>HYPERLIQUID</b><span>对冲腿</span></div>' +
-              '<div class="plan-mid"><b>' + (d.delta >= 0 ? "做空" : "做多") + " " + esc(d.und) + "-PERP · 约 " + usd(qty * Math.abs(d.delta), 0) + "</b><span>" + esc(d.und) + " " +
-                usd(D.market[d.und].px, 2) + " · 真实 Delta " + d.delta.toFixed(2) + "x 面值</span></div>" +
-              '<div class="plan-num"><b>' + usd(qty * Math.abs(d.delta) * D.COST.hlFeeBps / 10000, 2) + "</b><span>手续费</span></div>" +
-            "</div>" +
-          "</div>" +
-        "</section>" +
-
-        scenarioHtml +
-
-        '<section class="dsection" id="dsec-risk">' +
-          '<div class="dsection-h"><span class="eyebrow">结算与模型风险</span><small>模型 lognormal-iv v3.2</small></div>' +
-          '<div class="notes">' +
-            note("来源", "结算价取自 " + esc(d.src) + "，UMA 乐观预言机有 2 小时争议窗口；争议期间头寸无法提前退出。") +
-            note("模型", "公允概率由 HL 永续与期权曲面反推的数字期权价格，置信度 <b>" + d.conf + "/100</b>；低于 " + ruleVal("min-confidence", 62) + " 不自动执行。") +
-            note("流动性", "盘口资金 <b>" + usd(d.depth, 0) + "</b>，人工单默认使用 " + manualDepthPct + "% 深度，超过该规模的订单预计滑点上升 3–8bps。") +
-            note("规则检查", tailBlocked
-              ? "该结构为 <b>买入看涨二元 + 做空永续</b>，标的上涨时亏损无上限；已启用「仅允许有界尾部」。到「风控 → 规则与阈值」可显式关闭该规则，但不建议用于低风险账户。"
-              : settleBlocked
-              ? "结算冻结：距结算 <b>" + d.days.toFixed(1) + " 天</b>，当前阈值 <b>" + settleDays + " 天</b>；到「风控 → 规则与阈值」可调整。"
-              : deltaBlocked
-                ? "真实 Delta <b>" + Math.abs(d.delta).toFixed(1) + "x</b> 超过单事件上限 <b>" + maxDelta + "x</b>；到「风控 → 规则与阈值」可调整。"
-                : statusBlocked
-                  ? "当前信号状态「<b>" + esc(d.statusText) + "</b>」，规则不允许执行；阈值与开关都在「风控 → 规则与阈值」。"
-                  : "通过当前账户的净边、结算冻结、Delta、日亏、盘口深度、场所延迟与模拟交易开关；所有阈值均可在「风控 → 规则与阈值」查看和修改。") +
-          "</div>" +
-        "</section>" +
-
-      "</div>" +
-      '<div class="drawer-f">' +
-        '<div class="df-sum"><span>预计净边捕获 · ' + qty.toLocaleString("en-US") + " 股</span><b" +
-          (planProfit < 0 ? ' class="neg"' : "") + ">" + signedUsd(planProfit, 0) + "</b></div>" +
-        (settleBlocked || deltaBlocked || statusBlocked || tailBlocked ? '<button class="btn btn-ghost btn-sm" id="drawer-rule-btn">调整规则</button>' : "") +
-        '<button class="btn btn-ghost btn-sm" id="simulate-btn">试算</button>' +
-        '<button class="btn btn-primary" id="execute-btn"' + (canExecute ? "" : " disabled") + ">" +
-          (app.kill ? "熔断中" : !paperEnabled() ? "模拟暂停" : d.net <= 0 ? "净边为负" : sizeBlocked ? "限额不足最小股数" : tailBlocked ? "尾部无上限" : settleBlocked ? "结算冻结 · <" + settleDays + "天" : deltaBlocked ? "Delta 超限" : statusBlocked ? d.statusText : "执行套利") + "</button>" +
-      "</div>";
-
-    $("#drawer-root").hidden = false;
-    document.body.classList.add("has-drawer");
-    $("#drawer").focus();
-    if (app.lang === "en") scheduleLang();
-    drawerUntrap = trapFocus($("#drawer"), prevFocus);
-    $$("#drawer-tabs [data-drawer-goto]").forEach(btn => btn.addEventListener("click", () => {
-      const section = $("#dsec-" + btn.dataset.drawerGoto);
-      if (section) section.scrollIntoView({ behavior: "smooth", block: "start" });
-      $$("#drawer-tabs [data-drawer-goto]").forEach(b => b.classList.toggle("is-on", b === btn));
-    }));
-    if (app.route === "scanner") history.replaceState(null, "", "#/scanner/" + id);
-
-    const close = () => closeDrawer(prevFocus);
-    $("#drawer .x-btn").addEventListener("click", close);
-    $("#simulate-btn").addEventListener("click", () => {
-      toast("试算完成", "两条腿按当前盘口可成交 " + qty.toLocaleString("en-US") + " 股，预计滑点 5.8bps，净边捕获 " + signedUsd(planProfit, 0) + "。");
-    });
-    $("#execute-btn").addEventListener("click", () => {
-      if (!guard()) return;
-      if (d.net <= 0) { toast("净边为负", "扣除两腿成本后没有正收益，这里不会替你开这个仓。", "neg"); return; }
-      if (!paperEnabled()) { toast("模拟交易已暂停", "打开顶部「模拟交易」后再下单。", "warn"); return; }
-      if (sizeBlocked) { toast("可执行数量不足", "按当前净值、单笔上限、集中度与场所限额最多只能买 " + executableMax.toLocaleString("en-US") + " 股，低于最小 " + minQty + " 股。", "warn"); return; }
-      if (settleBlocked) { toast("结算冻结", "该事件距结算 " + d.days.toFixed(1) + " 天，低于当前规则阈值 " + settleDays + " 天，只允许减仓。到「风控」可调整阈值。", "warn"); return; }
-      if (deltaBlocked) { toast("Delta 超限", "真实 Delta " + Math.abs(d.delta).toFixed(1) + "x 超过当前上限 " + maxDelta + "x。到「风控」可调整阈值。", "warn"); return; }
-      if (tailBlocked) { toast("尾部亏损无上限", "该结构是买入看涨二元 + 做空永续：标的上涨时空头亏损不封顶。低风险模式禁止这类结构；需要有限亏损请用看涨期权/价差封顶。", "neg"); return; }
-      executeModal(d, qty, planProfit);
-    });
-    const ruleBtn = $("#drawer-rule-btn");
-    if (ruleBtn) ruleBtn.addEventListener("click", () => { closeDrawer(prevFocus); go("risk"); });
-  }
-
-  function note(k, text) {
-    return '<div class="note"><svg class="ic"><use href="#i-alert"/></svg><span><b>' + k + "</b> · " + text + "</span></div>";
-  }
-
-  function closeDrawer(focus) {
-    if ($("#drawer-root").hidden) return;
-    $("#drawer-root").hidden = true;
-    document.body.classList.remove("has-drawer");
-    $("#drawer").innerHTML = "";
-    app.sel = null;
-    if (drawerUntrap) { drawerUntrap(); drawerUntrap = null; }
-    if (app.route === "scanner") history.replaceState(null, "", "#/scanner");
-    if (focus && focus.focus && document.contains(focus)) focus.focus();
-  }
-
-  /* ---------------- execute flow ---------------- */
-  function executeModal(d, qty, profit) {
-    const maxQty = Math.floor(d.depth / d.ask / 100) * 100;
-    openModal({
-      title: "执行套利",
-      sub: esc(d.title),
-      body:
-        '<div class="field"><label>合约腿数量（YES 股）</label>' +
-          '<div class="size-input"><input type="number" id="size-qty" value="' + qty + '" min="100" max="' + maxQty + '" step="100">' +
-          '<button class="btn btn-ghost" data-size="0.25">25%</button>' +
-          '<button class="btn btn-ghost" data-size="0.5">50%</button>' +
-          '<button class="btn btn-ghost" data-size="1">盘口</button></div>' +
-          '<span class="hint">盘口可成交 ' + maxQty.toLocaleString("en-US") + " 股 · 超出后按对手价分批</span></div>" +
-        '<div class="kvbox" id="exec-preview"></div>' +
-        '<div class="warn-box"><svg class="ic"><use href="#i-alert"/></svg><p><b>两腿同时提交。</b>' +
-          "合约腿成交后 800ms 内发送对冲单；若对冲腿 30 秒未成交，系统自动撤单并把缺口转入待接管队列。</p></div>",
-      actions: [
-        { label: "取消", kind: "btn-ghost" },
-        {
-          label: "确认下单", kind: "btn-primary",
-          onClick: function () {
-            const input = $("#size-qty");
-            const q = Number(input.value);
-            if (!q || q < 100 || q > maxQty) {
-              input.closest(".field").classList.add("err");
-              toast("数量无效", "合约腿数量需在 100 至 " + maxQty.toLocaleString("en-US") + " 股之间。", "neg");
-              return false;
-            }
-            submitArb(d, q);
-          }
-        }
-      ],
-      onMount: function (modal) {
-        const input = $("#size-qty", modal);
-        const update = () => {
-          let q = Number(input.value) || 0;
-          q = clamp(q, 0, maxQty);
-          const cost = q * d.ask;
-          const hedge = q * Math.abs(d.delta);
-          const fees = hedge * D.COST.hlFeeBps / 10000;
-          const expect = q * d.net / 100;
-          $("#exec-preview", modal).innerHTML =
-            "<div><span>合约腿成本</span><b>" + usd(cost, 2) + "</b></div>" +
-            "<div><span>对冲腿规模</span><b>" + usd(hedge, 0) + " " + esc(d.und) + "-PERP</b></div>" +
-            "<div><span>预计费用（两腿）</span><b>" + usd(fees, 2) + "</b></div>" +
-            "<div><span>预计滑点</span><b>5.8 bps</b></div>" +
-            '<div class="total"><span>净边捕获</span><b>' + signedUsd(expect, 2) + "</b></div>";
-        };
-        input.addEventListener("input", update);
-        $$("[data-size]", modal).forEach(b => b.addEventListener("click", () => {
-          input.value = Math.max(100, Math.round(maxQty * Number(b.dataset.size) / 100) * 100);
-          update();
-        }));
-        update();
-      }
-    });
-  }
-
-  async function submitArb(d, qty) {
-    try {
-      await api.post("/api/orders", { eventId: d.id, qty: qty });
-    } catch (err) {
-      toast("下单失败", err.message || "服务端拒绝了这笔订单。", "neg");
-      return false;
-    }
-    closeDrawer();
-    syncFromState();
-    renderOrders(); renderNav(); renderOverview(); renderTable(); renderPositions(); renderRisk();
-    const hedge = qty * Math.abs(d.delta);
-    toast("套利已提交", "合约腿 " + qty.toLocaleString("en-US") + " YES 已提交；对冲腿 " + usd(hedge, 0) + " 将在成交后自动发送。", "ok", "查看执行台", () => go("execution"));
-    return true;
-  }
-
-  /* ---------------- rendering: topbar / nav ---------------- */
-  function renderNav() {
-    const rows = computed();
-    const signals = rows.filter(r => r.net >= D.MIN_EDGE_CENTS).length;
-    const ready = rows.filter(r => r.status === "ready").length;
-    const active = rows.filter(r => r.status === "active").length;
-    $("#nav-scan-count").textContent = signals;
-    $("#nav-scan-count").style.display = signals ? "" : "none";
-    $("#nav-exec-count").textContent = app.reviews.length;
-    $("#nav-exec-count").style.display = app.reviews.length ? "" : "none";
-    $("#kpi-opps").textContent = signals;
-    $("#kpi-ready").textContent = ready;
-    $("#kpi-active").textContent = active;
-    $("#sm-pass").textContent = signals;
-    if ($("#sm-covered")) $("#sm-covered").textContent = D.events.length;
-    if ($("#scan-universe")) $("#scan-universe").textContent = D.events.length;
-    $("#tab-review-count").textContent = app.reviews.length;
-    $("#ex-review").textContent = app.reviews.length;
-    $("#ex-active").textContent = app.orders.filter(o => o.status !== "filled").length;
-  }
-
-  function renderPulse() {
-    const m = D.market;
-    $("#px-btc").textContent = m.BTC.px.toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
-    $("#px-eth").textContent = m.ETH.px.toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
-    $("#px-hype").textContent = m.HYPE.px.toFixed(2);
-    const chg = (el, v) => {
-      const node = $(el);
-      node.textContent = (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(2) + "%";
-      node.className = "delta " + (v >= 0 ? "up" : "down");
-    };
-    chg("#chg-btc", m.BTC.chg);
-    chg("#chg-eth", m.ETH.chg);
-    chg("#chg-hype", m.HYPE.chg);
-  }
-
-  function renderVenues() {
-    const set = (id, status) => {
-      const btn = $(id);
-      if (!btn || !status) return;
-      const ok = status.state === "ok";
-      btn.querySelector(".dot").className = "dot " + (ok ? "ok" : status.state === "disabled" ? "" : status.state === "down" ? "bad" : "warn");
-      btn.querySelector("b").textContent = ok
-        ? (status.latencyMs != null ? status.latencyMs + "ms" : "在线")
-        : status.mode === "offline" ? "OFF" : status.mode === "demo" ? "TEST" : status.state === "disabled" ? "OFF" : "DOWN";
-      btn.title = status.label + " · " + status.message;
-    };
-    const pm = D.venues.find(v => v.id === "polymarket");
-    const hl = D.venues.find(v => v.id === "hyperliquid");
-    set("#venue-pm", pm);
-    set("#venue-hl", hl);
-    const note = $("#data-mode-note");
-    if (note) {
-      const sim = paperEnabled();
-      const exec = D.engine.tradingMode === "live" ? "实盘执行" : sim ? "纸面撮合" : "模拟暂停";
-      if (D.engine.catalogMode === "live") {
-        note.textContent = "实时行情 · PM 已接入 · HL 已接入 · " + exec;
-      } else {
-        const hlOk = hl?.state === "ok";
-        note.textContent = (hlOk ? "HL 实时行情" : "HL 不可达") + " · PM 离线 · 扫描暂停 · " + exec;
-      }
-      if (D.engine.liveBlockedReason) note.textContent += " · 实盘未启用";
-      note.title = [pm?.message, hl?.message, D.engine.liveBlockedReason].filter(Boolean).join("\n");
-    }
-    const dot = $("#engine-dot");
-    if (dot) dot.className = "dot " + (hl?.state === "ok" ? "ok" : "warn");
-    const modeChip = $("#acct-mode");
-    if (modeChip) {
-      const live = D.engine.tradingMode === "live";
-      const sim = paperEnabled();
-      modeChip.innerHTML = '<span class="dot ' + (live ? "ok" : sim ? "warn" : "bad") + '"></span>' + (live ? "实盘" : sim ? "纸面" : "模拟暂停");
-      modeChip.className = "chip " + (live ? "chip-live" : sim ? "chip-warn" : "chip-neg");
-      modeChip.title = D.engine.liveBlockedReason || (live ? "实盘执行已启用" : sim ? "纸面撮合：不会向交易所发送真实订单" : "模拟交易已暂停：不会新开仓");
-    }
-  }
-
-  function renderUser() {
-    const u = D.user;
-    if (!u) return;
-    const avatar = $("#user-avatar");
-    if (avatar) avatar.textContent = (u.name || u.email || "?").slice(0, 1).toUpperCase();
-    const name = $("#user-name");
-    if (name) name.textContent = u.name;
-    const email = $("#user-email");
-    if (email) email.textContent = u.email;
-    const isAdmin = u.role === "admin";
-    [$("#nav-admin"), $("#admin-link"), $("#admin-btn")].forEach(el => { if (el) el.hidden = !isAdmin; });
-    const simSw = $("#sim-switch");
-    if (simSw) simSw.disabled = u.role === "analyst";
-    const humanChip = $('#audit-chips [data-actor="林 · 自营"]');
-    if (humanChip) { humanChip.dataset.actor = u.name; humanChip.textContent = "人工操作"; }
-  }
-
-  /* ---------------- independent accounts ---------------- */
-  function acctStatus(a) {
-    if (!a.enabled) return { cls: "chip-mute", label: "已停用", dot: "", tone: "" };
-    if (a.kill) return { cls: "chip-neg", label: "已熔断", dot: "bad", tone: "neg" };
-    if (!a.auto) return { cls: "chip-warn", label: "自动暂停", dot: "warn", tone: "warn" };
-    if (a.id === "complete" && !a.signals) return { cls: "chip-warn", label: "等待配对", dot: "warn", tone: "warn" };
-    return { cls: "chip-ok", label: "运行中", dot: "ok", tone: "ok" };
-  }
-
-  function renderAccountChrome() {
-    const a = currentAcct();
-    if (!a) return;
-    const code = acctCode(a.id);
-    if ($("#rail-acct-label")) $("#rail-acct-label").textContent = code + " · " + a.name;
-    if ($("#acct-code")) $("#acct-code").textContent = code;
-    if ($("#acct-name")) $("#acct-name").textContent = a.name;
-    if ($("#acct-equity")) $("#acct-equity").textContent = usd(a.equity, 0);
-    const menu = $("#acct-menu");
-    if (menu) {
-      menu.innerHTML = app.accounts.map(x => {
-        const st = acctStatus(x);
-        return '<button class="acct-opt' + (x.id === a.id ? " is-on" : "") + '" data-acct-switch="' + x.id + '" role="option" aria-selected="' + (x.id === a.id) + '">' +
-          '<span class="acct-code">' + acctCode(x.id) + "</span>" +
-          '<span class="acct-opt-meta"><b>' + esc(x.name) + "</b><small>" + usd(x.equity, 0) + " · 持仓 " + x.positions + " · " + st.label + "</small></span>" +
-          '<span class="dot ' + (st.dot || "") + '"></span>' +
-        "</button>";
-      }).join("");
-    }
-    const label = code + " " + a.name;
-    if ($("#today-line")) $("#today-line").textContent = "OVERVIEW · " + label + " · " + dateStr() + " " + weekday();
-    if ($("#overview-sub")) $("#overview-sub").textContent = a.desc;
-    if ($("#scan-eyebrow")) $("#scan-eyebrow").textContent = "SCANNER · " + label;
-    if ($("#exec-eyebrow")) $("#exec-eyebrow").textContent = "EXECUTION · " + label;
-    if ($("#pos-eyebrow")) $("#pos-eyebrow").textContent = "POSITIONS · " + label;
-    if ($("#risk-eyebrow")) $("#risk-eyebrow").textContent = "RISK · " + label;
-    if ($("#scan-acct-chip")) $("#scan-acct-chip").textContent = label;
-    if ($("#scan-sub")) $("#scan-sub").textContent = a.logic;
-    if ($("#exec-sub")) $("#exec-sub").textContent = label + " 的两腿执行：只处理该账户的订单，单笔校验该账户限额；熔断也只停该账户。";
-    if ($("#pos-sub")) $("#pos-sub").textContent = label + " 的持仓与对冲；成本、保证金、盈亏与降仓线均按该账户独立核算。";
-    if ($("#risk-sub")) $("#risk-sub").textContent = label + " 的 " + app.limits.length + " 项限额、" + app.rules.length + " 条规则与熔断开关；与其他三个账户完全隔离。";
-    const cap = $("#scan-cap");
-    if (cap) {
-      cap.hidden = false;
-      const full = a.positions >= a.maxOpen;
-      cap.textContent = full
-        ? "持仓 " + a.positions + "/" + a.maxOpen + " · 已满仓，仅推送"
-        : "持仓 " + a.positions + "/" + a.maxOpen + " · 可开 " + (a.maxOpen - a.positions) + " 仓";
-      cap.className = "chip " + (full ? "chip-warn" : "chip-mute");
-    }
-    const railTop = $(".acct-top .eyebrow");
-    if (railTop) railTop.textContent = "当前账户 · " + code;
-    const mode = $("#acct-mode");
-    if (mode) {
-      const live = D.engine && D.engine.tradingMode === "live";
-      const sim = paperEnabled();
-      mode.className = "chip " + (live ? "chip-warn" : sim ? "chip-mute" : "chip-neg");
-      mode.innerHTML = '<span class="dot ' + (live ? "warn" : sim ? "" : "bad") + '"></span>' + (live ? "实盘" : sim ? "纸面" : "模拟暂停");
-    }
-    const sub = $("#acct-sub");
-    if (sub) sub.innerHTML = '<span class="dot ok"></span>独立账本 · ' + app.accounts.length + ' 个账户互不共享';
-  }
-
-  function accountCard(a) {
-    const st = acctStatus(a);
-    const used = clamp(a.usedPct || 0, 0, 1);
-    const barCls = used > 0.9 ? "neg" : used > 0.75 ? "warn" : "";
-    const value = a.pnl >= 0 ? "pos" : "neg";
-    return '<article class="acct-card' + (a.id === app.accountId ? " is-current" : "") + '" data-acct-card="' + a.id + '">' +
-      '<header class="acct-card-h">' +
-        '<span class="acct-code">' + acctCode(a.id) + "</span>" +
-        '<span class="acct-card-id"><b>' + esc(a.name) + "</b><small>" + a.short + " · " + esc(a.holdLabel) + "</small></span>" +
-        '<span class="chip ' + st.cls + '">' + st.label + "</span>" +
-      "</header>" +
-      '<div class="acct-card-eq num">' + usd(a.equity, 2) + "</div>" +
-      '<div class="acct-card-pnl">未实现 <b class="' + value + '">' + signedUsd(a.pnl, 0) + "</b><span> · 资金占用 " + pct(a.usedPct || 0) + "</span></div>" +
-      '<div class="acct-bar"><i class="' + barCls + '" style="width:' + (used * 100).toFixed(1) + '%"></i></div>' +
-      '<div class="acct-card-stats">' +
-        "<div><span>持仓 / 上限</span><b>" + a.positions + " / " + (a.maxOpen || "—") + "</b></div>" +
-        "<div><span>在途</span><b>" + a.openOrders + "</b></div>" +
-        "<div><span>信号</span><b>" + a.signals + "</b><small>可执行 " + a.ready + "</small></div>" +
-        "<div><span>净值占比</span><b>" + pct(a.equity / Math.max(1, (app.portfolio && app.portfolio.equity) || 1)) + "</b></div>" +
-      "</div>" +
-      '<p class="acct-desc">' + esc(a.desc + (a.requiresRealtime && a.signals === 0 ? " 当前为 3 分钟轮询，暂无实时报价年龄信号。" : "")) + "</p>" +
-      '<div class="acct-actions">' +
-        '<button class="btn btn-sm ' + (a.id === app.accountId ? "btn-primary" : "btn-ghost") + '" data-acct-enter="' + a.id + '">' + (a.id === app.accountId ? "当前账户" : "进入账户") + "</button>" +
-        '<button class="btn btn-sm btn-ghost" data-acct-auto="' + a.id + '">' + (a.auto ? "暂停执行" : "恢复执行") + "</button>" +
-        '<button class="btn btn-sm btn-danger-ghost" data-acct-kill="' + a.id + '">' + (a.kill ? "解除熔断" : "熔断") + "</button>" +
-      "</div>" +
-    "</article>";
-  }
-
-  function accountRow(a) {
-    const st = acctStatus(a);
-    const value = a.pnl >= 0 ? "pos" : "neg";
-    return '<tr data-acct-row="' + a.id + '" class="' + (a.id === app.accountId ? "is-expanded" : "") + '">' +
-      '<td><span class="acct-row-id"><span class="acct-code">' + acctCode(a.id) + "</span><b>" + esc(a.name) + "</b><small>" + a.short + "</small></span></td>" +
-      '<td class="num-col">' + usd(a.equity, 0) + "</td>" +
-      '<td class="num-col">' + usd(a.bookCost, 0) + "</td>" +
-      '<td class="num-col"><b class="' + value + '">' + signedUsd(a.pnl, 0) + "</b></td>" +
-      '<td class="num-col">' + a.positions + " / " + a.openOrders + "</td>" +
-      '<td class="num-col">' + a.signals + " / " + a.ready + "</td>" +
-      '<td class="num-col">' + pct(a.usedPct || 0) + "</td>" +
-      "<td><span class=\"chip " + st.cls + "\">" + st.label + "</span></td>" +
-      '<td><button class="row-go" data-acct-enter="' + a.id + '" aria-label="进入 ' + esc(a.name) + '"><svg class="ic"><use href="#i-arrow"/></svg></button></td>' +
-    "</tr>";
-  }
-
-  function renderAccounts() {
-    if (!$("#acct-grid")) return;
-    const p = app.portfolio || {};
-    $("#acc-head-total").textContent = usd(p.equity || 0, 0);
-    $("#acc-total-equity").textContent = usd(p.equity || 0, 2);
-    const pnl = p.pnl || 0;
-    $("#acc-total-pnl").textContent = signedUsd(pnl, 0);
-    $("#acc-total-pnl").className = "kpi-v num " + (pnl >= 0 ? "pos" : "neg");
-    $("#acc-total-deployed").textContent = usd(p.deployed || 0, 0);
-    $("#acc-total-used").textContent = pct(p.usedPct || 0);
-    const running = app.accounts.filter(a => a.enabled && !a.kill).length;
-    $("#acc-active").innerHTML = running + ' <span class="muted">/ ' + app.accounts.length + "</span>";
-    $("#acct-grid").innerHTML = app.accounts.map(accountCard).join("");
-    $("#acct-table").innerHTML = app.accounts.map(accountRow).join("");
-  }
-
-  async function switchAccount(id, thenOverview) {
-    closeAcctMenu();
-    if (id === app.accountId) {
-      if (thenOverview) go("overview");
-      return;
-    }
-    const a = acctById(id);
-    try {
-      await D.setAccount(id);
-      app.accountId = id;
-      app.sel = null;
-      app.expanded = null;
-      closeDrawer();
-      go(thenOverview ? "overview" : app.route);
-      toast("已切换账户", acctCode(id) + " " + a.name + " · 独立账本 · 净值 " + usd(a.equity, 0));
-    } catch (err) {
-      toast("切换失败", err.message || String(err), "neg");
-    }
-  }
-
-  async function toggleAccountAuto(id) {
-    const a = acctById(id);
-    if (!a) return;
-    try {
-      await api.patchSilent("/api/accounts/" + id, { auto: !a.auto });
-      await D.refresh();
-      toast(a.auto ? "已暂停该账户自动执行" : "已恢复该账户自动执行",
-        acctCode(id) + " " + a.name + " · 只影响该账户，不触碰其他账户。", a.auto ? "warn" : "ok");
-    } catch (err) {
-      toast("操作失败", err.message || String(err), "neg");
-    }
-  }
-
-  function accountKillModal(id) {
-    const a = acctById(id);
-    if (!a) return;
-    const releasing = a.kill;
-    openModal({
-      title: releasing ? "解除该账户熔断？" : "熔断该账户？",
-      sub: acctCode(id) + " " + esc(a.name) + " · 净值 " + usd(a.equity, 0) + " · 与其他账户完全独立",
-      body: releasing
-        ? '<div class="warn-box"><svg class="ic"><use href="#i-shield"/></svg><p>解除后该账户恢复自动执行；其他账户的熔断状态<b>不会被改变</b>。</p></div>'
-        : '<div class="field"><label>触发原因</label><select id="acct-kill-reason"><option>场所报价异常 / 断线</option><option>盘口深度骤降</option><option>模型或数据异常</option><option>人工演练</option></select></div>' +
-          '<div class="kvbox"><div><span>该账户持仓</span><b>' + a.positions + " 个</b></div><div><span>在途订单</span><b>" + a.openOrders + " 笔</b></div><div><span>待接管</span><b>" + (D.reviews.length) + " 笔</b></div><div class=\"total\"><span>影响范围</span><b>仅 " + acctCode(id) + "</b></div></div>" +
-          '<div class="warn-box"><svg class="ic"><use href="#i-alert"/></svg><p>会撤销该账户未成交挂单、停止新开仓与补对冲；<b>不会平掉已有头寸，也不会影响其他账户</b>。</p></div>',
-      actions: [
-        { label: "取消", kind: "btn-ghost" },
-        { label: releasing ? "确认解除" : "确认熔断", kind: releasing ? "btn-primary" : "btn-danger", onClick: function () {
-            const reason = ($("#acct-kill-reason") || {}).value || "人工操作";
-            void (async () => {
-              try {
-                await api.postSilent("/api/risk/kill", { accountId: id, enabled: !releasing, reason });
-                await D.refresh();
-                toast(releasing ? "该账户已解除熔断" : "该账户已熔断",
-                  acctCode(id) + " " + a.name + (releasing ? " 恢复执行。" : " 的挂单已撤销，其他账户不受影响。"), releasing ? "ok" : "neg");
-              } catch (err) {
-                toast("操作失败", err.message || String(err), "neg");
-              }
-            })();
-          } }
-      ]
-    });
-  }
-
-  function toggleAcctMenu(force) {
-    const menu = $("#acct-menu");
-    const btn = $("#acct-btn");
-    if (!menu || !btn) return;
-    const open = force == null ? menu.hidden : force;
-    menu.hidden = !open;
-    btn.setAttribute("aria-expanded", String(open));
-  }
-  function closeAcctMenu() { toggleAcctMenu(false); }
-
-  function renderAll() {
-    syncFromState();
-    renderPulse(); renderVenues(); renderUser(); updateSystem(); renderNav();
-    renderAccountChrome(); renderAccounts();
-    renderOverview(); renderTable(); renderOrders(); renderReviews(); renderPositions(); renderRisk(); renderAudit();
-    if (app.route === "execution") { renderOrders(); renderReviews(); renderAudit(); }
-    if (app.lang === "en") scheduleLang();
-  }
-
-  /* ---------------- overview ---------------- */
-  function meterWidth(used, limit) { return clamp(used / limit * 100, 0, 100); }
-
-  function renderOverview() {
-    const b = book();
-    const rows = computed();
-    const signals = rows.filter(r => r.net >= D.MIN_EDGE_CENTS).length;
-    const ready = rows.filter(r => r.status === "ready").length;
-    const active = rows.filter(r => r.status === "active").length;
-    const netEdges = rows.filter(r => r.net >= D.MIN_EDGE_CENTS).map(r => r.net).sort((a, z) => a - z);
-    const median = netEdges.length ? netEdges[Math.floor(netEdges.length / 2)] : 0;
-    const series = D.equity.length ? D.equity : [{ t: D.now(), v: D.equityNow }];
-    const last = series[series.length - 1].v;
-    const r30 = last / (series[Math.max(0, series.length - 31)].v || last) - 1;
-    const r12 = last / (series[0].v || last) - 1;
-    let peak90 = 0, dd90 = 0;
-    series.slice(-90).forEach(d => { peak90 = Math.max(peak90, d.v); dd90 = Math.min(dd90, d.v / peak90 - 1); });
-
-    $("#today-line").textContent = "OVERVIEW · " + (currentAcct() ? acctCode(app.accountId) + " " + currentAcct().name + " · " : "") + dateStr() + " " + weekday();
-    $("#hero-equity").textContent = usd(D.equityNow, 2);
-    $("#rail-equity").textContent = usd(D.equityNow, 2);
-    const spanDays = series.length > 1 ? (Date.now() - series[0].t) / 86_400_000 : 0;
-    $("#hero-30d").textContent = spanDays >= 30 ? signedPct(r30, 2) : "—";
-    $("#hero-12m").textContent = spanDays >= 365 ? signedPct(r12, 1) : "—";
-    $("#hero-30d").className = r30 >= 0 ? "pos" : "neg";
-    $("#hero-12m").className = r12 >= 0 ? "pos" : "neg";
-    const dayStart = new Date();
-    dayStart.setHours(0, 0, 0, 0);
-    const dayBase = series.filter(p => p.t >= dayStart.getTime())[0] ?? series[0] ?? { v: D.equityNow };
-    const todayPnl = D.equityNow - dayBase.v;
-    const todayEl = $("#hero-today");
-    if (todayEl) {
-      todayEl.textContent = signedUsd(todayPnl, 2);
-      todayEl.className = "delta " + (todayPnl >= 0 ? "up" : "down");
-    }
-    const todayPctEl = $("#hero-today-pct");
-    if (todayPctEl) todayPctEl.textContent = "今日 " + signedPct(dayBase.v > 0 ? todayPnl / dayBase.v : 0, 2);
-    const todayPnlEl = $("#hero-today-pnl");
-    if (todayPnlEl) {
-      todayPnlEl.textContent = signedUsd(todayPnl, 2);
-      todayPnlEl.className = "num " + (todayPnl >= 0 ? "pos" : "neg");
-    }
-    const contractPnl = b.rows.reduce((s, r) => s + r.contractPnl, 0);
-    const hedgePnl = b.rows.reduce((s, r) => s + r.hedgePnl, 0);
-    const totalPnl = contractPnl + hedgePnl;
-    const attrMax = Math.max(1, Math.abs(contractPnl), Math.abs(hedgePnl), Math.abs(totalPnl));
-    const attrContract = $("#attr-contract");
-    if (attrContract) {
-      attrContract.textContent = signedUsd(contractPnl, 0);
-      attrContract.className = "num " + (contractPnl >= 0 ? "pos" : "neg");
-      $("#attr-contract-bar").style.width = Math.abs(contractPnl) / attrMax * 100 + "%";
-      $("#attr-contract-bar").className = contractPnl >= 0 ? "pos" : "neg";
-    }
-    const attrHedge = $("#attr-hedge");
-    if (attrHedge) {
-      attrHedge.textContent = signedUsd(hedgePnl, 0);
-      attrHedge.className = "num " + (hedgePnl >= 0 ? "pos" : "neg");
-      $("#attr-hedge-bar").style.width = Math.abs(hedgePnl) / attrMax * 100 + "%";
-      $("#attr-hedge-bar").className = hedgePnl >= 0 ? "pos" : "neg";
-    }
-    const attrTotal = $("#attr-total");
-    if (attrTotal) {
-      attrTotal.textContent = signedUsd(totalPnl, 0);
-      attrTotal.className = "num " + (totalPnl >= 0 ? "pos" : "neg");
-      $("#attr-total-bar").style.width = Math.abs(totalPnl) / attrMax * 100 + "%";
-      $("#attr-total-bar").className = totalPnl >= 0 ? "pos" : "neg";
-    }
-    $("#kpi-dd").innerHTML = series.length > 1 ? "−" + Math.abs(dd90 * 100).toFixed(2) + '<i class="unit">%</i>' : "—";
-    const realized = D.account.realizedPnl ?? 0;
-    $("#kpi-realized").textContent = signedUsd(realized, 2);
-    $("#kpi-realized").className = "kpi-v num " + (realized >= 0 ? "pos" : "neg");
-    $("#kpi-trades").textContent = D.account.closedTrades ?? 0;
-    $("#kpi-wins").textContent = D.account.wins ?? 0;
-    $("#kpi-dd-at").textContent = D.equity.length > 1 ? dateShort(D.equity[0].t) + " 起" : "自起始";
-    $("#kpi-opps").textContent = signals;
-    $("#kpi-ready").textContent = ready;
-    $("#kpi-active").textContent = active;
-    $("#kpi-delta").textContent = signedUsd(b.netDelta, 0);
-    $("#kpi-delta").className = "kpi-v num " + (Math.abs(b.netDelta) > (limitMap().delta.value) * 0.8 ? "warn" : "");
-    const dl = limitMap().delta;
-    $("#kpi-delta-meta").textContent = "限额 " + usd(dl.value, 0) + " · 占用 " + pct(Math.abs(b.netDelta) / dl.value);
-    $("#kpi-median").innerHTML = median.toFixed(1) + '<i class="unit">¢</i>';
-    const medOf = arr => {
-      const s = arr.slice().sort((x, y) => x - y);
-      return s.length ? s[Math.floor(s.length / 2)] : 0;
-    };
-    const activeRows = rows.filter(r => r.net >= D.MIN_EDGE_CENTS);
-    $("#kpi-gross").textContent = medOf(activeRows.map(r => r.gross)).toFixed(1) + "¢";
-    $("#kpi-cost").textContent = medOf(activeRows.map(r => r.costBps / 100)).toFixed(1) + "¢";
-
-    const unhedged = b.netDelta;
-    $("#hero-unhedged").textContent = signedUsd(unhedged, 0);
-    $("#hero-unhedged").className = "num " + (Math.abs(unhedged) > 40000 ? "warn" : "");
-    $("#hero-pnl").textContent = signedUsd(b.pnl, 0);
-    const util = (b.cost + b.margin) / D.equityNow;
-    $("#hero-util").textContent = pct(util);
-
-    // live account / system facts
-    const pm = D.venues.find(v => v.id === "polymarket");
-    const hl = D.venues.find(v => v.id === "hyperliquid");
-    const upMin = Math.max(1, Math.round((Date.now() - (D.engine.startedAt || Date.now())) / 60000));
-    const upText = upMin < 60 ? upMin + " 分钟" : Math.floor(upMin / 60) + " 小时 " + (upMin % 60) + " 分";
-    const connected = D.venues.filter(v => v.state === "ok").length;
-    const acctSub = $("#acct-sub");
-    if (acctSub) acctSub.innerHTML = '<span class="dot ' + (connected ? "ok" : "warn") + '"></span>' + connected + " 个场所已接入 · 运行 " + upText;
-    const sysScan = $("#sys-scan");
-    if (sysScan) sysScan.textContent = (D.settings.scanIntervalMs / 1000).toFixed(1) + "s";
-    const sysLatency = $("#sys-latency");
-    if (sysLatency) sysLatency.textContent = "PM " + (pm?.latencyMs != null ? pm.latencyMs + "ms" : pm?.state === "disabled" ? "OFF" : "—") + " · HL " + (hl?.latencyMs != null ? hl.latencyMs + "ms" : hl?.state === "disabled" ? "OFF" : "—");
-    const today = startOfTradingDay();
-    const todayOrders = app.orders.filter(o => (o.createdAt || 0) >= today);
-    const todayNotional = todayOrders.reduce((s, o) => s + (o.notional || 0), 0);
-    const sysTrades = $("#sys-trades");
-    if (sysTrades) sysTrades.textContent = todayOrders.length + " 笔 · " + compactUsd(todayNotional);
-    const filled = app.orders.filter(o => o.status === "filled").length;
-    const sysAuto = $("#sys-auto");
-    if (sysAuto) sysAuto.textContent = app.orders.length ? pct(filled / app.orders.length) : "—";
-    const onRules = D.rules.filter(r => r.on).length;
-    const killCount = app.audit.filter(a => a.action === "熔断").length;
-    const sysFoot = $("#sys-foot");
-    if (sysFoot) sysFoot.querySelector("span").textContent = "风控护栏 " + onRules + " 项启用 · 今日 " + killCount + " 次熔断";
-
-    // radar
-    const top = rows.slice().sort((a, z) => z.net - a.net).slice(0, 5);
-    $("#radar-list").innerHTML = top.map((d, i) =>
-      '<button class="radar-row" data-open="' + d.id + '">' +
-        '<span class="radar-rank">' + pad(i + 1) + "</span>" +
-        '<span class="radar-main"><span class="radar-title">' + eventTitleHtml(d.title) + "</span>" +
-          '<span class="radar-meta"><span class="chip">' + esc(d.cat) + "</span><span>" + daysText(d.days) + "</span><span>·</span><span>可成交 " + compactUsd(d.depth) + "</span></span></span>" +
-        '<span class="radar-pair"><span class="pair-mini"><span data-radar="ask">' + cents(d.ask) + "</span><em>PM</em></span>" +
-          '<span class="pair-link"></span><span class="pair-mini"><span data-radar="fair">' + cents(d.fair) + "</span><em>HL</em></span></span>" +
-        '<span class="radar-edge"><b data-radar="edge">' + signedCents(d.net) + "</b><small data-radar=\"bps\">" + bps(d.netBps) + " bps</small></span>" +
-        '<span class="radar-go"><svg class="ic"><use href="#i-arrow"/></svg></span>' +
-      "</button>"
-    ).join("");
-
-    // budget
-    const limits = limitMap();
-    $("#budget-list").innerHTML = ["pm", "hl", "delta", "settle", "conc"].map(id => {
-      const l = limits[id];
-      const w = meterWidth(l.used, l.value);
-      const cls = w > 90 ? "is-neg" : w > 72 ? "is-warn" : "";
-      return '<div class="budget-item"><div class="budget-top"><span>' + esc(l.name.replace(" · Polymarket", "")) +
-        "</span><b>" + (l.kind === "pct" ? l.used.toFixed(1) + "% / " + l.value + "%" : compactUsd(l.used) + " <em>/ " + compactUsd(l.value) + "</em>") +
-        '</b></div><div class="meter"><i class="' + cls + '" style="width:' + w + '%"></i></div></div>';
-    }).join("");
-
-    const acct = currentAcct();
-    if ($("#ov-blocks")) $("#ov-blocks").textContent = D.riskEvents.length + " 次";
-    if ($("#ov-kill")) $("#ov-kill").textContent = app.kill ? "1" : "0";
-    if ($("#ov-limits")) $("#ov-limits").textContent = app.limits.length + " 项";
-    if ($("#budget-note-text")) $("#budget-note-text").textContent =
-      "本账户（" + (acct ? acctCode(acct.id) + " " + acct.name : "") + "）的限额、规则与熔断独立于其他账户。";
-
-    $("#feed").innerHTML = D.feed.map(f =>
-      '<li><span class="feed-time">' + f.t + "</span>" +
-        '<span class="dot ' + (f.kind === "warn" ? "warn" : "ok") + ' feed-dot"></span>' +
-        '<div class="feed-body"><p>' + esc(f.title) + "</p><small>" + esc(f.detail) + "</small></div>" +
-        '<span class="feed-val ' + (f.kind === "warn" ? "warn" : "pos") + '">' + esc(f.val) + "</span></li>"
-    ).join("");
-
-    $("#radar-updated").textContent = "0.6s";
-    if ($("#scan-cadence")) $("#scan-cadence").textContent = (D.settings.scanIntervalMs / 1000).toFixed(1) + "s";
-    renderSpark();
-  }
-
-  function limitMap() {
-    const b = book();
-    const map = {};
-    app.limits.forEach(l => {
-      let used = 0;
-      if (l.id === "pm") used = b.cost;
-      if (l.id === "hl") used = b.margin;
-      if (l.id === "delta") used = Math.abs(b.netDelta);
-      if (l.id === "settle") used = b.settle7;
-      if (l.id === "conc") used = b.maxCost / D.equityNow * 100;
-      map[l.id] = { ...l, used };
-    });
-    return map;
-  }
-
-  function sparkSVG() {
-    let pts = D.equity.slice(-30);
-    if (!pts.length) pts = [{ t: D.now(), v: D.equityNow }];
-    if (pts.length === 1) pts = [pts[0], { ...pts[0] }];
-    const w = 220, h = 76, p = 3;
-    const vals = pts.map(d => d.v);
-    const min = Math.min(...vals), max = Math.max(...vals);
-    const x = i => p + i / (vals.length - 1) * (w - p * 2);
-    const y = v => p + (1 - (v - min) / (max - min || 1)) * (h - p * 2);
-    const line = vals.map((v, i) => (i ? "L" : "M") + x(i).toFixed(1) + "," + y(v).toFixed(1)).join(" ");
-    const area = line + " L" + x(vals.length - 1) + "," + (h - p) + " L" + x(0) + "," + (h - p) + " Z";
-    return '<svg class="chart-svg" viewBox="0 0 ' + w + " " + h + '" preserveAspectRatio="none" aria-hidden="true">' +
-      '<defs><linearGradient id="sparkFill" x1="0" y1="0" x2="0" y2="1">' +
-        '<stop offset="0%" stop-color="oklch(0.84 0.105 200)" stop-opacity=".26"/>' +
-        '<stop offset="100%" stop-color="oklch(0.84 0.105 200)" stop-opacity="0"/>' +
-      "</linearGradient></defs>" +
-      '<path d="' + area + '" fill="url(#sparkFill)"/>' +
-      '<path d="' + line + '" fill="none" stroke="oklch(0.84 0.105 200)" stroke-width="1.4" stroke-linejoin="round"/>' +
-      '<circle cx="' + x(vals.length - 1) + '" cy="' + y(vals[vals.length - 1]) + '" r="2.4" fill="oklch(0.84 0.105 200)"/>' +
-      "</svg>";
-  }
-
-  function renderSpark() { $("#hero-spark").innerHTML = sparkSVG(); }
-
-  /* ---------------- equity chart ---------------- */
-  function renderChart() {
-    const host = $("#equity-chart");
-    if (!host) return;
-    const width = Math.max(280, host.clientWidth - 8);
-    const height = 268;
-    const pad = { l: 6, r: 54, t: 14, b: 24 };
-    const n = app.range;
-    let data = D.equity.slice(-(n + 1));
-    if (!data.length) data = [{ t: D.now(), v: D.equityNow }];
-    if (data.length === 1) data = [data[0], { ...data[0], t: data[0].t + 86400000 }];
-    const vals = data.map(d => d.v);
-    let min = Math.min(...vals), max = Math.max(...vals);
-    const span0 = max - min || 1;
-    min -= span0 * 0.14; max += span0 * 0.10;
-    const x = i => pad.l + i / (data.length - 1) * (width - pad.l - pad.r);
-    const y = v => pad.t + (1 - (v - min) / (max - min)) * (height - pad.t - pad.b);
-    const bottom = height - pad.b;
-
-    let line = "";
-    data.forEach((d, i) => { line += (i ? "L" : "M") + x(i).toFixed(1) + "," + y(d.v).toFixed(1); });
-    const area = line + " L" + x(data.length - 1).toFixed(1) + "," + bottom + " L" + x(0).toFixed(1) + "," + bottom + " Z";
-
-    let grid = "";
-    for (let i = 0; i < 4; i++) {
-      const v = min + (max - min) * (i / 3);
-      const yy = y(v);
-      grid += '<line x1="' + pad.l + '" y1="' + yy + '" x2="' + (width - pad.r) + '" y2="' + yy + '" stroke="oklch(0.45 0.013 255 / .22)" stroke-dasharray="2 4"/>' +
-        '<text x="' + (width - pad.r + 8) + '" y="' + (yy + 3) + '" fill="oklch(0.6 0.01 255)" font-size="9" font-family="Cascadia Mono, Consolas, monospace">' + compactUsd(v) + "</text>";
-    }
-
-    let xs = "";
-    [0, 0.33, 0.66, 1].forEach(f => {
-      const i = Math.round((data.length - 1) * f);
-      xs += '<text x="' + x(i) + '" y="' + (height - 6) + '" fill="oklch(0.58 0.01 255)" font-size="9" font-family="Cascadia Mono, Consolas, monospace" text-anchor="' + (f === 0 ? "start" : f === 1 ? "end" : "middle") + '">' + dateShort(data[i].t) + "</text>";
-    });
-
-    host.innerHTML =
-      '<svg class="chart-svg" width="' + width + '" height="' + height + '" viewBox="0 0 ' + width + " " + height + '" role="img" aria-label="组合净值曲线">' +
-        "<defs><linearGradient id=\"eqFill\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\">" +
-          '<stop offset="0%" stop-color="oklch(0.84 0.105 200)" stop-opacity=".20"/>' +
-          '<stop offset="100%" stop-color="oklch(0.84 0.105 200)" stop-opacity="0.01"/>' +
-        "</linearGradient></defs>" +
-        grid +
-        '<path d="' + area + '" fill="url(#eqFill)"/>' +
-        '<path d="' + line + '" fill="none" stroke="oklch(0.84 0.105 200)" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>' +
-        '<circle cx="' + x(data.length - 1) + '" cy="' + y(vals[vals.length - 1]) + '" r="3" fill="oklch(0.84 0.105 200)"/>' +
-        '<circle cx="' + x(data.length - 1) + '" cy="' + y(vals[vals.length - 1]) + '" r="7" fill="oklch(0.84 0.105 200)" opacity=".18"/>' +
-        xs +
-        '<line id="eq-cross" x1="0" y1="' + pad.t + '" x2="0" y2="' + bottom + '" stroke="oklch(0.84 0.105 200 / .45)" stroke-width="1" opacity="0"/>' +
-        '<circle id="eq-dot" r="3.2" fill="oklch(0.135 0.006 255)" stroke="oklch(0.84 0.105 200)" stroke-width="1.6" opacity="0"/>' +
-        '<rect id="eq-hit" x="' + pad.l + '" y="' + pad.t + '" width="' + (width - pad.l - pad.r) + '" height="' + (height - pad.t - pad.b) + '" fill="transparent"/>' +
-      "</svg>";
-    host.insertAdjacentHTML("beforeend", '<div class="chart-tip" id="eq-tip"></div>');
-
-    const svg = host.querySelector("svg");
-    const hit = host.querySelector("#eq-hit");
-    const cross = host.querySelector("#eq-cross");
-    const dot = host.querySelector("#eq-dot");
-    const tip = host.querySelector("#eq-tip");
-
-    const move = e => {
-      const rect = svg.getBoundingClientRect();
-      const px = (e.clientX - rect.left) * (width / rect.width);
-      const i = clamp(Math.round((px - pad.l) / (width - pad.l - pad.r) * (data.length - 1)), 0, data.length - 1);
-      const cx = x(i), cy = y(data[i].v);
-      cross.setAttribute("x1", cx); cross.setAttribute("x2", cx); cross.setAttribute("opacity", "1");
-      dot.setAttribute("cx", cx); dot.setAttribute("cy", cy); dot.setAttribute("opacity", "1");
-      const ret = data[i].v / data[0].v - 1;
-      tip.innerHTML = "<b>" + usd(data[i].v, 0) + "</b><span>" + dateShort(data[i].t) + " · " + signedPct(ret, 2) + "</span>";
-      const scale = rect.width / width;
-      tip.style.left = (svg.offsetLeft + clamp(cx, 54, width - 54) * scale) + "px";
-      tip.style.top = (svg.offsetTop + cy * scale - 8) + "px";
-      tip.classList.add("is-on");
-    };
-    hit.addEventListener("mousemove", move);
-    hit.addEventListener("mouseleave", () => {
-      cross.setAttribute("opacity", "0");
-      dot.setAttribute("opacity", "0");
-      tip.classList.remove("is-on");
-    });
-
-    const ret = vals[vals.length - 1] / vals[0] - 1;
-    const rets = [];
-    for (let i = 1; i < vals.length; i++) rets.push(vals[i] / vals[i - 1] - 1);
-    const mean = rets.length ? rets.reduce((s, v) => s + v, 0) / rets.length : 0;
-    const sd = rets.length ? Math.sqrt(rets.reduce((s, v) => s + (v - mean) ** 2, 0) / rets.length) || 0.0001 : 0;
-    let peak = vals[0], dd = 0;
-    vals.forEach(v => { peak = Math.max(peak, v); dd = Math.min(dd, v / peak - 1); });
-    $("#eq-ret").textContent = signedPct(ret, 2);
-    $("#eq-ret").className = "num " + (ret >= 0 ? "pos" : "neg");
-    $("#eq-sharpe").textContent = rets.length > 1 ? (mean / sd * Math.sqrt(365)).toFixed(2) : "—";
-    $("#eq-dd").textContent = "−" + Math.abs(dd * 100).toFixed(2) + "%";
-    $("#eq-trades").textContent = D.account.closedTrades ?? 0;
-  }
-
-  /* ---------------- scanner ---------------- */
-  function applyCols() {
-    const table = $("#opp-table");
-    if (!table) return;
-    const keys = ["depth", "hedge", "conf", "due", "status"];
-    for (const k of keys) table.classList.toggle("hide-" + k, app.cols[k] === false);
-    const btn = $("#col-btn");
-    if (btn) btn.textContent = "列显示 " + keys.filter(k => app.cols[k] !== false).length + "/" + keys.length;
-    requestAnimationFrame(() => {
-      const scroller = $("#view-scanner .tbl-scroll");
-      const hint = $(".tbl-scroll-hint");
-      if (hint && scroller) hint.hidden = scroller.scrollWidth <= scroller.clientWidth + 1;
-    });
-  }
-
-  function renderRadar() {
-    const radar = $("#scan-radar");
-    const blips = $("#radar-blips");
-    const sw = $("#scan-mode");
-    if (!radar || !blips) return;
-    const on = app.scanMode;
-    radar.classList.toggle("is-paused", !on);
-    if (sw) sw.setAttribute("aria-checked", String(on));
-    const state = $("#radar-state");
-    const meta = $("#radar-meta");
-    const rows = computed().filter(r => r.net >= D.MIN_EDGE_CENTS);
-    if (state) state.textContent = on ? "扫描中" : "已暂停";
-    if (meta) meta.textContent = on
-      ? rows.length + " 个机会 · 扫描 #" + Number(D.engine.scanSeq || 0).toLocaleString("en-US")
-      : rows.length + " 个机会 · 动画已暂停";
-    if (!on) return;
-    const top = rows.slice(0, 8);
-    blips.innerHTML = top.map((r, i) => {
-      const angle = ((r.und.charCodeAt(0) || 0) * 13 + i * 53) % 360 * Math.PI / 180;
-      const radius = 17 + Math.min(29, Math.abs(r.net) * 3.4 + i * 2.2);
-      const x = 50 + Math.cos(angle) * radius;
-      const y = 50 + Math.sin(angle) * radius;
-      const hot = r.status === "ready" || r.net >= 3.5;
-      return '<i class="radar-blip' + (hot ? " is-hot" : "") + '" style="left:' + x.toFixed(1) + "%;top:" + y.toFixed(1) + '%"></i>';
-    }).join("");
-  }
-
-  function filterRows() {
-    const o = app.opp;    let rows = computed();
-    if (o.q) {
-      const q = o.q.toLowerCase();
-      rows = rows.filter(r => (r.title + r.cat + r.und + r.src).toLowerCase().indexOf(q) > -1);
-    }
-    if (o.cat !== "all") rows = rows.filter(r => r.cat === o.cat);
-    rows = rows.filter(r => r.net >= o.minEdge);
-    if (o.horizon !== "all") rows = rows.filter(r => r.days <= Number(o.horizon));
-    if (o.onlyReady) rows = rows.filter(r => r.status === "ready");
-
-    const dir = o.sortDir === "asc" ? 1 : -1;
-    const key = o.sortKey;
-    rows.sort((a, z) => {
-      let va, vz;
-      if (key === "title") { va = a.title; vz = z.title; return va.localeCompare(vz, "zh") * dir; }
-      if (key === "pair") { va = a.fair - a.ask; vz = z.fair - z.ask; }
-      if (key === "edge") { va = a.netBps; vz = z.netBps; }
-      if (key === "depth") { va = a.depth; vz = z.depth; }
-      if (key === "hedge") { va = a.hedgeUsd; vz = z.hedgeUsd; }
-      if (key === "conf") { va = a.conf; vz = z.conf; }
-      if (key === "due") { va = a.days; vz = z.days; return (va - vz) * (o.sortDir === "asc" ? 1 : -1); }
-      return (va - vz) * dir;
-    });
-    return rows;
-  }
-
-  function renderTable() {
-    const rows = filterRows();
-    const tbody = $("#opp-body");
-    tbody.innerHTML = rows.map(d =>
-      '<tr data-id="' + d.id + '" tabindex="0">' +
-        '<td><div class="ev-cell"><div class="ev-title">' + eventTitleHtml(d.title) + "</div>" +
-          '<div class="ev-meta"><span class="chip">' + esc(d.cat) + "</span><span>" + daysText(d.days) + "</span>" +
-          '<span class="sep"></span><span class="src">' + esc(d.src) + "</span></div></div></td>" +
-        '<td class="num-col"><div class="pair-cell">' +
-          '<div class="pair-line"><span class="pair-l">PM</span><span class="pair-v" data-f="ask">' + cents(d.ask) + "</span></div>" +
-          '<div class="pair-line is-fair"><span class="pair-l">HL</span><span class="pair-v" data-f="fair">' + cents(d.fair) + "</span></div>" +
-        "</div></td>" +
-        '<td class="num-col"><div class="edge-cell"><b data-f="net"' + (d.net < -0.005 ? ' class="neg"' : "") + ">" + signedCents(d.net) + "</b>" +
-          '<span class="edge-mini"><i data-f="bar"' + (d.net < -0.005 ? ' class="neg"' : "") + ' style="width:' + d.edgeWidth + '%"></i></span>' +
-          '<small data-f="bps">' + bps(d.netBps) + " bps</small></div></td>" +
-        '<td class="num-col size-cell"><b>' + compactUsd(d.depth) + "</b><small>盘口 " + Math.round(d.depth / Math.max(1, d.ask * 1e3)) + "k 股</small></td>" +
-        '<td class="num-col"><div class="hedge-cell">' + compactUsd(d.hedgeUsd) + "<small>" + (d.delta >= 0 ? "做空" : "做多") + " · " + Math.abs(d.delta).toFixed(2) + "x</small></div></td>" +
-        '<td class="num-col"><div class="conf"><span class="conf-num">' + d.conf + '</span><span class="conf-bar"><i class="' + (d.conf >= 80 ? "hi" : d.conf >= 65 ? "" : "lo") + '" style="width:' + d.conf + '%"></i></span></div></td>' +
-        '<td class="num-col"><div class="due-cell' + (d.days <= 7 ? " is-soon" : "") + '">' + dateShort(Date.parse(d.due)) + "<small>" + daysText(d.days) + "</small></div></td>" +
-        '<td data-f="status">' + statusChip(d) + "</td>" +
-        '<td><button class="row-go" data-open="' + d.id + '" aria-label="查看 ' + esc(d.title) + '"><svg class="ic"><use href="#i-arrow"/></svg></button></td>' +
-      "</tr>"
-    ).join("");
-
-    const cards = $("#opp-cards");
-    if (cards) {
-      cards.innerHTML = rows.map(d =>
-        '<button class="opp-card" data-id="' + d.id + '">' +
-          '<span class="oc-top"><span class="oc-title">' + eventTitleHtml(d.title) + "</span>" + statusChip(d) + "</span>" +
-          '<span class="oc-meta"><span class="chip">' + esc(d.cat) + "</span><span>" + daysText(d.days) + "</span><span>·</span><span>可成交 " + compactUsd(d.depth) + "</span></span>" +
-          '<span class="oc-bottom"><span class="oc-pair">PM <b>' + cents(d.ask) + '</b><span class="oc-arrow">→</span>HL <b>' + cents(d.fair) + "</b></span>" +
-            '<span class="oc-edge"><b' + (d.net < -0.005 ? ' class="neg"' : "") + ">" + signedCents(d.net) + "</b><small>" + bps(d.netBps) + " bps</small></span></span>" +
-        "</button>"
-      ).join("");
-    }
-    const tableCard = $("#view-scanner .table-card");
-    if (tableCard) tableCard.classList.toggle("is-filled", rows.length > 0);
-
-    const sumDepth = rows.reduce((s, r) => s + r.depth, 0);
-    const sumEdge = rows.reduce((s, r) => s + r.net / 100 * (r.depth / r.ask), 0);
-
-    $("#sum-count").textContent = rows.length;
-    $("#sum-depth").textContent = sumDepth ? "$" + (sumDepth / 1e6).toFixed(2) + "M" : "$0";
-    $("#sum-edge").textContent = "$" + Math.round(sumEdge).toLocaleString("en-US");
-
-    const sigRows = computed().filter(r => r.net >= D.MIN_EDGE_CENTS);
-    const sigDepth = sigRows.reduce((s, r) => s + r.depth, 0);
-    const sigNets = sigRows.map(r => r.net).sort((a, z) => a - z);
-    $("#sm-pass").textContent = sigRows.length;
-    if ($("#sm-covered")) $("#sm-covered").textContent = String(D.engine.universe || D.events.length);
-    $("#sm-depth").textContent = "$" + (sigDepth / 1e6).toFixed(2) + "M";
-    $("#sm-edge").textContent = cents((sigNets.length ? sigNets[Math.floor(sigNets.length / 2)] : 0) / 100);
-
-    const empty = rows.length === 0;
-    $("#opp-empty").hidden = !empty;
-    if (empty) {
-      const isComplete = currentAcct()?.id === "complete";
-      if ($("#opp-empty-title")) $("#opp-empty-title").textContent = isComplete ? "暂无同结算的跨场所完整集" : "没有符合条件的标的";
-      if ($("#opp-empty-text")) $("#opp-empty-text").textContent = isComplete
-        ? "S5 只接受标的、行权价、结算时间与结算源完全一致的两条腿；当前没有满足条件的配对，因此不会生成伪套利。"
-        : "试着清空搜索词，或放宽净边阈值与到期窗口。";
-    }
-    const oppScroll = $("#view-scanner .table-card .tbl-scroll");
-    if (oppScroll) oppScroll.style.display = empty ? "none" : "";
-
-    $$("#opp-table thead th").forEach(th => {
-      const k = th.dataset.sort;
-      th.classList.toggle("is-sorted", k === app.opp.sortKey);
-      th.classList.toggle("is-asc", k === app.opp.sortKey && app.opp.sortDir === "asc");
-      if (k) th.setAttribute("aria-sort", k === app.opp.sortKey ? (app.opp.sortDir === "asc" ? "ascending" : "descending") : "none");
-    });
-    applyCols();
-    renderRadar();
-    renderNav();
-    if (app.lang === "en") scheduleLang();
-  }
-
-  function updateLiveCells() {
-    const tbody = $("#opp-body");
-    if (!tbody.children.length) return;
-    Array.from(tbody.children).forEach(tr => {
-      const ev = D.event(tr.dataset.id);
-      if (!ev) return;
-      const d = D.derive(ev);
-      const set = (f, txt) => { const n = tr.querySelector('[data-f="' + f + '"]'); if (n) n.textContent = txt; };
-      const askNode = tr.querySelector('[data-f="ask"]');
-      const prevAsk = askNode ? parseFloat(askNode.textContent) : d.ask * 100;
-      set("ask", cents(d.ask));
-      set("fair", cents(d.fair));
-      set("bps", bps(d.netBps) + " bps");
-      const netNode = tr.querySelector('[data-f="net"]');
-      if (netNode) {
-        netNode.textContent = signedCents(d.net);
-        netNode.classList.toggle("neg", d.net < -0.005);
-      }
-      const bar = tr.querySelector('[data-f="bar"]');
-      if (bar) {
-        bar.style.width = d.edgeWidth + "%";
-        bar.classList.toggle("neg", d.net < -0.005);
-      }
-      const st = tr.querySelector('[data-f="status"]');
-      if (st && st.innerHTML !== statusChip(d)) st.innerHTML = statusChip(d);
-      if (Math.abs(prevAsk - d.ask * 100) > 0.05) {
-        tr.classList.remove("flash-up", "flash-down");
-        void tr.offsetWidth;
-        tr.classList.add(d.ask * 100 > prevAsk ? "flash-up" : "flash-down");
-      }
-    });
-  }
-
-  function updateRadarCells() {
-    $$("#radar-list .radar-row").forEach(row => {
-      const ev = D.event(row.dataset.open);
-      if (!ev) return;
-      const d = D.derive(ev);
-      const ask = row.querySelector('[data-radar="ask"]');
-      const fair = row.querySelector('[data-radar="fair"]');
-      const edge = row.querySelector('[data-radar="edge"]');
-      const bp = row.querySelector('[data-radar="bps"]');
-      if (ask) ask.textContent = cents(d.ask);
-      if (fair) fair.textContent = cents(d.fair);
-      if (edge) edge.textContent = signedCents(d.net);
-      if (bp) bp.textContent = bps(d.netBps) + " bps";
-    });
-  }
-
-  /* ---------------- execution ---------------- */
-  function legHTML(leg) {
-    const pctFill = leg.qty ? clamp(leg.filled / leg.qty * 100, 0, 100) : 0;
-    const cls = pctFill >= 99.5 ? "full" : pctFill > 0 ? "partial" : "";
-    const unit = leg.venue === "HYPERLIQUID" ? "$" : "";
-    const fmtQty = n => unit + Math.round(n).toLocaleString("en-US");
-    return '<div class="leg ' + cls + '">' +
-      '<div class="leg-h"><span class="venue"><span class="dot ' + (pctFill > 0 ? "ok" : "") + '"></span>' + leg.venue + "</span>" +
-      '<span class="leg-side ' + leg.side + '">' + (leg.side === "buy" ? "买入" : leg.side === "long" ? "做多" : "做空") + "</span></div>" +
-      '<div class="leg-bar"><i style="width:' + pctFill + '%"></i></div>' +
-      '<div class="leg-stats"><span>' + fmtQty(leg.filled) + " / " + fmtQty(leg.qty) + "</span>" +
-        "<b>" + (leg.price ? (leg.venue === "POLYMARKET" ? cents(leg.price) : usd(leg.price, 1)) : "—") + "</b></div>" +
-      (leg.note ? '<div class="leg-note"><svg class="ic"><use href="#i-alert"/></svg>' + esc(leg.note) + "</div>" : "") +
-      "</div>";
-  }
-
-  function renderOrders() {
-    const host = $("#order-list");
-    if (!host) return;
-    host.innerHTML = app.orders.map(o => {
-      const ev = D.event(o.evId) || { id: o.evId, title: o.evId, cat: "—", und: "—", due: "", days: 0, ask: 0, fair: 0, delta: 0, quoteAgeMs: 0 };
-      const d = D.derive(ev);
-      const hedge = o.legs[1];
-      const gap = Math.max(0, hedge.qty - hedge.filled);
-      const chip = o.status === "filled"
-        ? '<span class="chip chip-ok">已成交</span>'
-        : o.status === "failed"
-          ? '<span class="chip chip-neg">失败</span>'
-          : o.status === "leg1"
-            ? '<span class="chip chip-warn">等待合约腿</span>'
-            : o.status === "settling"
-              ? '<span class="chip chip-accent">收尾</span>'
-              : '<span class="chip chip-warn">对冲中</span>';
-      return '<article class="order">' +
-        '<div class="order-top"><div>' +
-          '<div class="order-id">' + o.id + " · " + o.opened + " · " + esc(o.strategy) + "</div>" +
-          '<div class="order-title">' + eventTitleHtml(ev.title) + "</div>" +
-          '<div class="order-sub">' + chip + "<span>" + esc(ev.cat) + "</span><span>·</span><span>" + daysText(d.days) + "后结算</span></div>" +
-        "</div>" +
-        '<div class="order-right"><div class="order-notional"><b>' + usd(o.notional, 0) + "</b><small>合约腿名义</small></div></div></div>" +
-        '<div class="legs">' + legHTML(o.legs[0]) + legHTML(o.legs[1]) + "</div>" +
-        '<div class="order-foot"><div class="order-kv">' +
-          "<div>已成交<b>" + usd(o.legs[0].notional + o.legs[1].notional, 0) + "</b></div>" +
-          "<div>计划滑点<b>" + (o.slippageBps || 5).toFixed(1) + " bps</b></div>" +
-          "<div>当前滑点<b>" + (o.status === "filled" ? (o.slippageBps + 0.4).toFixed(1) : "—") + " bps</b></div>" +
-          (gap > 1 ? '<span class="gap-warn"><svg class="ic"><use href="#i-alert"/></svg>对冲缺口 ' + usd(gap, 0) + "</span>" : "") +
-        "</div>" +
-        '<div class="order-actions">' +
-          (o.status !== "filled" ? '<button class="btn btn-sm btn-ghost" data-order-hedge="' + o.id + '"' + (app.kill ? ' disabled title="熔断中，补对冲已停止"' : "") + ">补对冲</button>" : "") +
-          (o.status === "filled"
-            ? '<button class="btn btn-sm btn-ghost" data-order-archive="' + o.id + '">归档</button>'
-            : '<button class="btn btn-sm btn-danger-ghost" data-order-flat="' + o.id + '">立即平仓</button>') +
-        "</div></div></article>";
-    }).join("");
-
-    const openOrders = app.orders.filter(o => o.status !== "filled");
-    $("#ex-active").textContent = openOrders.length;
-    $("#ex-active-notional").textContent = usd(openOrders.reduce((s, o) => s + o.notional, 0), 0);
-    $("#ex-review").textContent = app.reviews.length;
-    $("#tab-active-count").textContent = openOrders.length;
-    $("#tab-review-count").textContent = app.reviews.length;
-    $("#nav-exec-count").textContent = app.reviews.length;
-    $("#nav-exec-count").style.display = app.reviews.length ? "" : "none";
-
-    const today = startOfTradingDay();
-    const todayOrders = app.orders.filter(o => (o.createdAt || 0) >= today);
-    const todayNotional = todayOrders.reduce((s, o) => s + (o.notional || 0), 0);
-    const todayEl = $("#ex-today");
-    if (todayEl) todayEl.textContent = compactUsd(todayNotional);
-    const todaySub = $("#ex-today-sub");
-    if (todaySub) todaySub.textContent = todayOrders.length + " 笔 · 执行中 " + openOrders.length + " 笔";
-    const filled = app.orders.filter(o => o.status === "filled" && o.slippageBps);
-    const avgSlip = filled.length ? filled.reduce((s, o) => s + o.slippageBps, 0) / filled.length : 0;
-    const slipEl = $("#ex-slip");
-    if (slipEl) slipEl.innerHTML = (avgSlip ? avgSlip.toFixed(1) : "—") + '<i class="unit">bps</i>';
-
-    const empty = app.orders.length === 0;
-    $("#order-list").hidden = empty;
-    const orderEmpty = $("#order-empty");
-    if (orderEmpty) orderEmpty.hidden = !empty;
-  }
-
-  function renderReviews() {
-    const host = $("#review-list");
-    if (!host) return;
-    host.innerHTML = app.reviews.map(r => {
-      const ev = D.event(r.evId) || { title: r.evId };
-      return '<article class="review" data-review="' + r.id + '">' +
-        '<div class="review-top"><div>' +
-          '<div class="review-reason"><svg class="ic"><use href="#i-alert"/></svg>' + esc(r.kind) + " · " + r.id + "</div>" +
-          '<div class="order-title">' + eventTitleHtml(ev.title) + "</div>" +
-          '<div class="order-sub"><span>' + esc(r.reason) + "</span></div>" +
-        "</div>" +
-        '<div style="text-align:right;flex:none"><span class="countdown" data-countdown="' + r.id + '">' + countdown(r.seconds) + "</span><small>自动平仓倒计时</small></div></div>" +
-        '<div class="review-advice"><svg class="ic"><use href="#i-bolt"/></svg><span>引擎建议：<b>' + esc(r.advice) + "</b></span></div>" +
-        '<div class="order-foot"><div class="order-kv"><div>已执行动作<b style="font-family:var(--font-ui);font-size:11px">' + esc(r.action) + "</b></div></div>" +
-          '<div class="order-actions">' +
-            '<button class="btn btn-sm btn-ghost" data-review-ignore="' + r.id + '">忽略</button>' +
-            '<button class="btn btn-sm btn-danger-ghost" data-review-flat="' + r.id + '">立即平仓</button>' +
-            '<button class="btn btn-sm btn-primary" data-review-take="' + r.id + '">接管</button>' +
-          "</div></div></article>";
-    }).join("");
-    if (!app.reviews.length) {
-      host.innerHTML = '<div class="empty"><svg class="ic"><use href="#i-check"/></svg><b>没有需要接管的订单</b><p>两条腿对齐、参数在阈值内，系统会自己处理。</p></div>';
-    }
-    const meta = $("#ex-review-meta");
-    if (meta) {
-      meta.textContent = app.reviews.length
-        ? "最早 " + countdown(app.reviews.reduce((m, r) => Math.min(m, r.seconds), Infinity)) + " 后自动平仓"
-        : "没有待接管的订单";
-    }
-    $("#tab-review-count").textContent = app.reviews.length;
-    $("#nav-exec-count").textContent = app.reviews.length;
-    $("#nav-exec-count").style.display = app.reviews.length ? "" : "none";
-  }
-
-  function renderAudit() {
-    const rows = app.audit.filter(a => app.auditActor === "all" || a.actor === app.auditActor);
-    $("#audit-body").innerHTML = rows.map(a => {
-      const dot = a.actor === "风控" ? "warn" : a.actor === "自动引擎" ? "ok" : "";
-      return "<tr><td class=\"time\">" + a.t + '</td><td><span class="actor"><span class="dot ' + dot + '"></span>' + esc(a.actor) + "</span></td>" +
-        "<td>" + esc(a.action) + "</td><td>" + esc(a.obj) + "</td><td class=\"muted\">" + esc(a.venue) + "</td>" +
-        '<td class="detail">' + esc(a.detail) + "</td></tr>";
-    }).join("");
-    $("#audit-count").textContent = rows.length + " 条";
-  }
-
-  /* ---------------- positions ---------------- */
-  function renderPositions() {
-    const b = book();
-    const rows = app.posFilter === "warn" ? b.rows.filter(r => r.ratio < 0.9) : b.rows;
-
-    $("#pos-face").textContent = usd(b.face, 0);
-    $("#pos-delta").textContent = signedUsd(b.netDelta, 0);
-    $("#pos-delta").className = "kpi-v num " + (Math.abs(b.netDelta) > (app.limits.find(l => l.id === "delta")?.value || 1) * 0.8 ? "warn" : "");
-    $("#pos-delta-pct").textContent = signedPct(b.netDelta / D.equityNow, 2) + " · " + (b.netDelta >= 0 ? "多向" : "空向");
-    const deltaLimit = app.limits.find(l => l.id === "delta");
-    if (deltaLimit) $("#pos-delta-limit").textContent = usd(deltaLimit.value, 0);
-    $("#pos-margin").textContent = usd(b.margin, 0);
-    const marginMeta = $("#pos-margin-meta");
-    if (marginMeta) marginMeta.textContent = "占净值 " + pct(b.margin / D.equityNow) + " · 按 4.8x 折算";
-    $("#pos-pnl").textContent = signedUsd(b.pnl, 0);
-    $("#pos-warn-count").textContent = b.undehedged;
-    $("#pos-all-count").textContent = b.rows.length;
-    const faceMeta = $("#pos-face-meta");
-    if (faceMeta) faceMeta.textContent = b.rows.length + " 个事件 · " + Object.keys(b.byUnd).length + " 个标的";
-    const distFace = $("#dist-face");
-    if (distFace) distFace.textContent = "名义 " + compactUsd(b.face);
-    const coverMeta = $("#pos-cover-meta");
-    if (coverMeta) {
-      coverMeta.textContent = b.target > 0
-        ? "已覆盖 " + Math.round(b.hedge / b.target * 100) + "% 的 Delta 敞口"
-        : "没有需要覆盖的 Delta 敞口";
-    }
-    $("#pos-pnl").className = "kpi-v num " + (b.pnl >= 0 ? "pos" : "neg");
-    $("#hero-pnl").textContent = signedUsd(b.pnl, 0);
-    $("#hero-unhedged").textContent = signedUsd(b.netDelta, 0);
-    $("#hero-util").textContent = pct((b.cost + b.margin) / D.equityNow);
-
-    // distribution by underlying
-    const totalFace = b.face || 1;
-    const unds = Object.keys(b.byUnd).sort((a, z) => b.byUnd[z].face - b.byUnd[a].face);
-    $("#dist-underlying").innerHTML = unds.length
-      ? unds.map(u =>
-          '<div class="dist-row"><span class="dist-k">' + u + '</span>' +
-            '<span class="dist-bar"><i style="width:' + (b.byUnd[u].face / totalFace * 100).toFixed(1) + '%"></i></span>' +
-            '<span class="dist-v">' + compactUsd(b.byUnd[u].face) + "<small>" + (b.byUnd[u].face / totalFace * 100).toFixed(1) + "%</small></span></div>"
-        ).join("")
-      : '<p class="note"><svg class="ic"><use href="#i-wallet"/></svg><span>还没有持仓。建立对冲组合后，这里会按标的拆开名义敞口。</span></p>';
-
-    const buckets = [
-      { k: "≤ 14 天", min: 0, max: 14 },
-      { k: "15–45 天", min: 14, max: 45 },
-      { k: "46–90 天", min: 45, max: 90 },
-      { k: "> 90 天", min: 90, max: 9999 }
-    ];
-    const totalCost = b.cost || 1;
-    $("#dist-tenor").innerHTML = b.rows.length
-      ? buckets.map(bk => {
-          const val = b.rows.filter(r => r.d.days > bk.min && r.d.days <= bk.max).reduce((s, r) => s + r.cost, 0);
-          return '<div class="dist-row"><span class="dist-k">' + bk.k + '</span>' +
-            '<span class="dist-bar"><i style="width:' + (val / totalCost * 100).toFixed(1) + '%"></i></span>' +
-            '<span class="dist-v">' + compactUsd(val) + "<small>" + (val / totalCost * 100).toFixed(1) + "%</small></span></div>";
-        }).join("")
-      : '<p class="note"><svg class="ic"><use href="#i-clock"/></svg><span>还没有持仓。建仓后这里会按到期日拆分资金占用与保证金。</span></p>';
-
-    $("#pos-body").innerHTML = rows.map(r => {
-      const isOpen = app.expanded === r.evId;
-      const ratioCls = r.ratio < 0.85 ? "low" : r.ratio < 0.95 ? "mid" : "";
-      const main =
-        '<tr class="row-main' + (isOpen ? " is-expanded" : "") + '" data-pos="' + r.evId + '" tabindex="0" aria-expanded="' + (isOpen ? "true" : "false") + '">' +
-          '<td><div class="pos-title"><span class="ev-title">' + eventTitleHtml(r.ev.title) + "</span></div>" +
-            '<div class="pos-sub"><span class="chip">' + esc(r.ev.und) + "</span><span>" + esc(r.ev.cat) + "</span></div></td>" +
-          '<td class="num-col"><div class="hedge-cell">' + Math.round(r.qty).toLocaleString("en-US") + " 股<small>" + cents(r.avg) + " → " + cents(r.mark) + "</small></div></td>" +
-          '<td class="num-col"><div class="hedge-cell">' + usd(r.hedgeUsd, 0) + "<small>" + (r.hedgeSide === "long" ? "做多" : "做空") + " " + esc(r.ev.und) + " @ " + usd(r.hedgeEntry, 1) + "</small></div></td>" +
-          '<td class="num-col"><span class="ratio ' + ratioCls + '"><span class="ratio-bar"><i style="width:' + clamp(r.ratio * 100, 0, 100) + '%"></i></span><b>' + (r.ratio * 100).toFixed(0) + "%</b></span></td>" +
-          '<td class="num-col"><div class="hedge-cell">' + (r.deltaUsd >= 0 ? "" : "−") + usd(Math.abs(r.deltaUsd), 0) + "<small>" + (r.deltaUsd > 0 ? "多向敞口" : "空向敞口") + "</small></div></td>" +
-          '<td class="num-col"><div class="hedge-cell ' + (r.pnl >= 0 ? "pos" : "neg") + '">' + signedUsd(r.pnl, 0) + "<small>合约 " + signedUsd(r.contractPnl, 0) + "</small></div></td>" +
-          '<td class="num-col"><div class="due-cell' + (r.d.days <= 7 ? " is-soon" : "") + '">' + dateShort(Date.parse(r.ev.due)) + "<small>" + daysText(r.d.days) + "</small></div></td>" +
-          '<td><button class="row-go" data-align="' + r.evId + '" aria-label="对齐对冲腿"><svg class="ic"><use href="#i-refresh"/></svg></button></td>' +
-        "</tr>";
-
-      const detail = isOpen
-        ? '<tr class="legd-row"><td colspan="8"><div class="legd">' +
-            '<div class="legd-box"><div class="legd-h">合约腿 · POLYMARKET <span>' + esc(r.ev.id) + "</span></div><div class=\"legd-rows\">" +
-              "<div><span>方向 / 数量</span><b>买入 YES · " + Math.round(r.qty).toLocaleString("en-US") + "</b></div>" +
-              "<div><span>均价 / 标记</span><b>" + cents(r.avg) + " / " + cents(r.mark) + "</b></div>" +
-              "<div><span>成本</span><b>" + usd(r.cost, 2) + "</b></div>" +
-              "<div><span>未实现</span><b class=\"" + (r.contractPnl >= 0 ? "pos" : "neg") + "\">" + signedUsd(r.contractPnl, 2) + "</b></div>" +
-            "</div></div>" +
-            '<div class="legd-box"><div class="legd-h">对冲腿 · HYPERLIQUID <span>' + (r.hedgeSide === "long" ? "做多" : "做空") + " " + esc(r.ev.und) + "-PERP</span></div><div class=\"legd-rows\">" +
-              "<div><span>规模 / 目标</span><b>" + usd(r.hedgeUsd, 0) + " / " + usd(r.target, 0) + "</b></div>" +
-              "<div><span>入场 / 标记</span><b>" + usd(r.hedgeEntry, 2) + " / " + usd(r.mk.px, 2) + "</b></div>" +
-              "<div><span>保证金</span><b>" + usd(r.hedgeUsd / 4.8, 0) + "</b></div>" +
-              "<div><span>未实现</span><b class=\"" + (r.hedgePnl >= 0 ? "pos" : "neg") + "\">" + signedUsd(r.hedgePnl, 2) + "</b></div>" +
-            "</div></div>" +
-          "</div></td></tr>"
-        : "";
-
-      return main + detail;
-    }).join("");
-
-    // 空态：整体没有持仓，与"筛选后为空"是两种不同情况，文案不能共用。
-    const posEmpty = $("#pos-empty");
-    const posScroll = $("#view-positions .table-card .tbl-scroll");
-    if (!b.rows.length) {
-      if (posEmpty) posEmpty.hidden = false;
-      if (posScroll) posScroll.style.display = "none";
-    } else {
-      if (posEmpty) posEmpty.hidden = true;
-      if (posScroll) posScroll.style.display = "";
-      if (!rows.length) {
-        $("#pos-body").innerHTML = '<tr class="legd-row"><td colspan="8"><div class="empty" style="border:0;padding:26px 0"><svg class="ic"><use href="#i-check"/></svg><b>没有对冲不足的头寸</b><p>所有头寸的对冲比例都在 90% 以上，无需补单。</p></div></td></tr>';
-      }
-    }
-
-    updateRiskLimits();
-    updateRiskView();
-  }
-
-  async function alignHedge(evId) {
-    if (app.kill) { toast("已熔断", "熔断期间停止补对冲，请先在风控页解除。", "neg"); return; }
-    const v = D.positionView(D.positions.find(x => x.evId === evId));
-    if (v && v.ratio >= 0.999) { toast("已对齐", "该头寸的对冲比例已经达到目标。"); return; }
-    try {
-      await api.post(`/api/positions/${encodeURIComponent(evId)}/align`);
-    } catch (err) {
-      toast("补对冲失败", err.message, "neg");
-      return;
-    }
-    syncFromState();
-    renderPositions(); renderOverview(); renderNav();
-    toast("补对冲已提交", (v ? v.ev.title : evId) + " 的对冲比例已回到 100%。");
-  }
-
-  /* ---------------- risk ---------------- */
-  function updateRiskLimits() {
-    const map = limitMap();
-    const host = $("#limit-list");
-    if (!host) return;
-    host.innerHTML = app.limits.map(l => {
-      const v = map[l.id];
-      const w = clamp(v.used / v.value * 100, 0, 100);
-      const cls = w > 95 ? "is-neg" : w > 80 ? "is-warn" : "";
-      const isEdit = app.editingLimit === l.id;
-      const usedTxt = l.kind === "pct" ? v.used.toFixed(1) + "%" : compactUsd(v.used);
-      const valTxt = l.kind === "pct" ? l.value + "%" : compactUsd(l.value);
-      return '<div class="limit-item">' +
-        '<div class="limit-name"><b>' + esc(l.name) + "</b><span>" + esc(l.desc) + "</span></div>" +
-        '<div class="limit-meter"><i class="' + cls + '" style="width:' + w + '%"></i></div>' +
-        '<div class="limit-right">' +
-          (isEdit
-            ? '<div class="limit-edit"><input type="number" id="limit-input" value="' + l.value + '" step="' + (l.kind === "pct" ? "1" : "10000") + '">' +
-              '<div class="limit-actions"><button class="mini-btn ok" data-limit-save="' + l.id + '">存</button><button class="mini-btn" data-limit-cancel>×</button></div></div>'
-            : '<div class="limit-val"><b>' + usedTxt + "</b><span>/ " + valTxt + "</span></div>" +
-              '<button class="mini-btn" data-limit-edit="' + l.id + '">改</button>') +
-        "</div>" +
-        "</div>";
-    }).join("");
-
-    if (app.editingLimit) {
-      const input = $("#limit-input");
-      if (input) {
-        input.focus();
-        input.select();
-        input.addEventListener("keydown", e => {
-          if (e.key === "Enter") saveLimit(app.editingLimit);
-          if (e.key === "Escape") { app.editingLimit = null; updateRiskLimits(); }
-        });
-      }
-    }
-  }
-
-  async function saveLimit(id) {
-    const input = $("#limit-input");
-    if (!input) return;
-    const val = Number(input.value);
-    try {
-      const res = await api.put(`/api/risk/limits/${encodeURIComponent(id)}`, { value: val });
-      syncFromState();
-      app.editingLimit = null;
-      updateRiskLimits(); renderOverview(); renderNav();
-      const l = res.limit;
-      toast("限额已更新", l.name + " → " + (l.kind === "pct" ? val + "%" : usd(val, 0)) + "，已同步至下单前校验。");
-    } catch (err) {
-      toast("限额未保存", err.message, "neg");
-    }
-  }
-
-  function ruleInput(r) {
-    if (r.value == null) return "";
-    const unit = ruleUnit(r.id);
-    return '<label class="rule-param"><input type="number" data-rule-value="' + r.id + '"' +
-      ' value="' + r.value + '" min="' + (r.min ?? 0) + '" max="' + (r.max ?? 1e9) + '" step="' + (r.step ?? 1) + '"' +
-      ' aria-label="' + esc(r.name) + ' 阈值"><span>' + unit + "</span></label>";
-  }
-
-  function renderRules() {
-    const groups = [];
-    for (const r of app.rules) {
-      const cat = r.category || "账户规则";
-      let g = groups.find(x => x.cat === cat);
-      if (!g) { g = { cat, rows: [] }; groups.push(g); }
-      g.rows.push(r);
-    }
-    $("#rule-list").innerHTML = groups.map(g =>
-      '<div class="rule-cat">' + esc(g.cat) + "</div>" +
-      g.rows.map(r =>
-        '<div class="rule" data-rule-row="' + r.id + '">' +
-          '<div class="rule-body"><b>' + esc(r.name) + (r.hard ? ' <span class="rule-hard">硬约束</span>' : "") + "</b><span>" + esc(r.desc) + "</span></div>" +
-          '<div class="rule-side">' + ruleInput(r) +
-            '<button class="switch switch-sm" role="switch" aria-checked="' + r.on + '" data-rule="' + r.id + '"' +
-              (r.hard ? " disabled" : "") + ' aria-label="' + esc(r.name) + '"><span class="knob"></span></button>' +
-          "</div>" +
-        "</div>"
-      ).join("")
-    ).join("");
-    const count = app.rules.filter(r => r.on).length;
-    const countEl = $("#rules-count");
-    if (countEl) countEl.textContent = count + " / " + app.rules.length + " 启用";
-    if ($("#risk-sub")) {
-      const label = currentAcct() ? acctCode(app.accountId) + " " + currentAcct().name : "当前账户";
-      $("#risk-sub").textContent = label + " 的 " + app.limits.length + " 项限额、" + app.rules.length + " 条可见规则与熔断开关；风控/执行阈值可修改，策略边界只读展示。";
-    }
-    const foot = $("#rule-foot");
-    if (foot) {
-      const acct = currentAcct();
-      foot.innerHTML = "策略边界（只读）：" + esc(acct?.logic || "—") +
-        "。硬约束：最小股数不可关闭；熔断、PM 离线、模拟交易关闭属于全局状态，显示在顶栏与横幅，不是隐藏规则。输入框失焦即保存，开关即时生效。";
-    }
-  }
-
-  function renderRiskCalendar() {
-    const now = D.now();
-    const rows = D.calendar.map(c => {
-      const ev = D.event(c.evId) || { title: c.evId, due: "", und: "" };
-      const pos = D.positions.find(p => p.evId === c.evId);
-      const view = pos ? D.positionView(pos) : null;
-      const exposure = view ? view.cost : c.exposure;
-      const due = Date.parse(ev.due);
-      const days = Number.isFinite(due) ? (due - now) / 86400000 : 0;
-      return { ev, days, exposure, note: c.note };
-    }).sort((a, b) => a.days - b.days);
-
-    $("#risk-calendar").innerHTML = rows.map(r =>
-      '<div class="cal-row"><span class="cal-date">' + (r.ev.due ? dateShort(Date.parse(r.ev.due)) : "—") + "<small>" + (r.days < 1 ? "今日" : Math.round(r.days) + " 天后") + "</small></span>" +
-      '<span class="cal-title">' + eventTitleHtml(r.ev.title) + "<small>" + esc(r.note) + "</small></span>" +
-      '<span class="cal-exp">' + compactUsd(r.exposure) + "<small>成本暴露</small></span></div>"
-    ).join("");
-  }
-
-  function renderRiskFeed() {
-    $("#risk-feed").innerHTML = D.riskEvents.map(e =>
-      '<li><span class="feed-time">' + e.t + "</span>" +
-        '<span class="dot ' + e.level + ' feed-dot"></span>' +
-        '<div class="feed-body"><p><b>' + esc(e.title) + "</b></p><small>" + esc(e.detail) + "</small></div>" +
-        '<span class="feed-val">' + esc(e.val) + "</span></li>"
-    ).join("");
-    $("#kp-check").textContent = clockStr();
-    if ($("#kp-blocks")) $("#kp-blocks").textContent = D.riskEvents.length + " 次";
-    $("#risk-state").innerHTML = '<span class="dot ' + (app.kill ? "bad" : "ok") + '"></span>' +
-      (app.kill ? "本账户已熔断 · 等待人工解除" : "本账户正常 · 独立护栏");
-  }
-
-  function updateRiskView() {
-    if ($("#limit-list")) updateRiskLimits();
-    renderRiskCalendar();
-  }
-
-  function renderRisk() {
-    updateRiskLimits();
-    renderRules();
-    renderRiskCalendar();
-    renderRiskFeed();
-    updateSystem();
-    const kpCount = $("#kp-count");
-    if (kpCount) kpCount.textContent = String(app.audit.filter(a => a.action === "熔断").length);
-  }
-
-  /* ---------------- kill switch ---------------- */
-  function killModal() {
-    const acct = currentAcct();
-    const label = acct ? acctCode(acct.id) + " " + acct.name : "本账户";
-    if (app.kill) {
+  const act = el.dataset.act;
+  const id = el.dataset.id;
+  try {
+    if (act === "nav") go(id);
+    else if (act === "switch-account") await switchAccount(id);
+    else if (act === "toggle-auto") await toggleAuto(id);
+    else if (act === "kill-acct") killConfirm(id);
+    else if (act === "kill") killConfirm(S.account);
+    else if (act === "refresh-all") { await loadState(); toast("已刷新", "行情、两个策略台与账户快照已更新。"); }
+    else if (act === "refresh-negrisk") { const r = await api("/api/negrisk/refresh", { method: "POST", body: { accountId: "negrisk" } }); toast("NegRisk 已刷新", r.negRisk + " 个事件"); await loadState({ silent: true }); }
+    else if (act === "refresh-mm") { await api("/api/mm/refresh", { method: "POST", body: { accountId: "marketmaking" } }); toast("做市报价已刷新"); await loadState({ silent: true }); }
+    else if (act === "export-negrisk") downloadCsv();
+    else if (act === "convert") openConvert(id);
+    else if (act === "mm-params") openMmParams();
+    else if (act === "mm-pause") {
+      const paused = el.dataset.paused === "true";
+      await api("/api/mm/pause", { method: "POST", body: { accountId: "marketmaking", marketId: id, paused } });
+      toast(paused ? "已暂停该市场" : "已恢复该市场", "", "warn");
+      await loadState({ silent: true });
+    } else if (act === "mm-flatten") {
+      await api("/api/mm/flatten", { method: "POST", body: { accountId: "marketmaking", marketId: id } });
+      toast("该市场库存已平", "", "warn");
+      await loadState({ silent: true });
+    } else if (act === "flatten-all") {
+      const has = (mm().positions || []).some(p => p.inventory !== 0);
+      if (!has) { toast("没有库存", "做市台当前是空仓。", "warn"); return; }
       openModal({
-        title: "解除本账户熔断",
-        sub: label + " · 解除后该账户的自动执行与补对冲会恢复；其他账户不受影响。",
-        body:
-          '<div class="field"><label>解除原因</label><select id="kill-reason">' +
-            "<option>盘口与连接已人工核验</option><option>误触发，无需停市</option><option>已完成风险排查</option></select></div>" +
-          '<div class="warn-box"><svg class="ic"><use href="#i-shield"/></svg><p>解除后第一笔订单仍会走该账户的完整两腿校验，<b>不会绕过</b>限额与延迟规则。</p></div>',
-        actions: [
-          { label: "保持熔断", kind: "btn-ghost" },
-          { label: "确认解除", kind: "btn-primary", onClick: function () {
-              const why = ($("#kill-reason") || {}).value || "人工确认";
-              void api.post("/api/risk/kill", { enabled: false, reason: why })
-                .then(() => {
-                  syncFromState();
-                  updateSystem(); renderAccountChrome(); renderAccounts(); renderOrders(); renderRisk(); renderTable(); renderNav();
-                  toast("本账户已解除熔断", label + " 自动执行恢复；其他账户状态不变。");
-                })
-                .catch(err => toast("解除失败", err.message, "neg"));
-            } }
-        ]
-      });
-      return;
-    }
-    openModal({
-      title: "熔断本账户？",
-      sub: label + " · 只撤销该账户的未成交挂单并停止其新开仓与补对冲；其他账户继续运行。",
-      body:
-        '<div class="field"><label>触发原因</label><select id="kill-reason">' +
-          "<option>场所报价异常 / 断线</option><option>盘口深度骤降</option><option>模型或数据异常</option><option>人工演练</option></select></div>" +
-        '<div class="kvbox"><div><span>账户净值</span><b>' + (acct ? usd(acct.equity, 0) : "—") + "</b></div>" +
-          "<div><span>进行中订单</span><b>" + app.orders.filter(o => o.status !== "filled").length + " 笔</b></div>" +
-          "<div><span>待接管</span><b>" + app.reviews.length + " 笔</b></div>" +
-          '<div class="total"><span>影响范围</span><b>仅 ' + (acct ? acctCode(acct.id) : "本账户") + "</b></div></div>" +
-        '<div class="warn-box"><svg class="ic"><use href="#i-alert"/></svg><p>熔断<b>不会自动平仓</b>。已成交的合约腿与对冲腿会保留，避免在异常行情中制造额外滑点。</p></div>',
-      actions: [
-        { label: "取消", kind: "btn-ghost" },
-        { label: "确认熔断", kind: "btn-danger", onClick: function () {
-            const why = ($("#kill-reason") || {}).value || "人工触发";
-            void api.post("/api/risk/kill", { enabled: true, reason: why })
-              .then(() => {
-                syncFromState();
-                updateSystem(); renderAccountChrome(); renderAccounts(); renderOrders(); renderRisk(); renderTable(); renderNav();
-                toast("本账户已熔断", label + " 的挂单已撤销；其他账户不受影响。", "neg");
-              })
-              .catch(err => toast("熔断失败", err.message, "neg"));
-          } }
-      ]
-    });
-  }
-
-  /* ---------------- routing ---------------- */
-  const routes = ["overview", "accounts", "scanner", "execution", "positions", "risk", "admin"];
-  const titles = { overview: "总览", accounts: "账户", scanner: "机会扫描", execution: "执行台", positions: "持仓", risk: "风控", admin: "管理" };
-
-  function parseHash() {
-    const parts = (location.hash || "#/overview").replace(/^#\//, "").split("/");
-    return {
-      route: routes.indexOf(parts[0]) > -1 ? parts[0] : "overview",
-      id: parts[1] || null
-    };
-  }
-
-  function go(route, push) {
-    if (routes.indexOf(route) < 0) route = "overview";
-    if (route === "admin" && (!D.user || D.user.role !== "admin")) {
-      toast("仅管理员", "当前账号没有管理权限。", "neg");
-      history.replaceState(null, "", "#/overview");
-      route = "overview";
-    }
-    app.route = route;
-    $$(".view").forEach(v => { v.hidden = v.dataset.view !== route; });
-    $$(".nav-item").forEach(n => {
-      const on = n.dataset.route === route;
-      n.classList.toggle("is-active", on);
-      if (on) n.setAttribute("aria-current", "page"); else n.removeAttribute("aria-current");
-    });
-    $("#viewport").scrollTop = 0;
-    const navList = $(".nav");
-    if (navList) navList.scrollTop = 0;
-    document.title = "CONVERGENCE · " + (app.lang === "en" ? translatePhrase(titles[route]) : titles[route]);
-    // 详情抽屉只属于扫描器：切到别的视图还挂着它，会遮住刚切过去的页面。
-    if (!$("#drawer-root").hidden && route !== "scanner") closeDrawer();
-    if (push !== false) history.replaceState(null, "", "#/" + route);
-    if (route === "overview") {
-      const v = $('[data-view="overview"]');
-      v.classList.remove("is-entering"); void v.offsetWidth; v.classList.add("is-entering");
-      renderChart();
-    }
-    if (route === "positions") renderPositions();
-    if (route === "risk") renderRisk();
-    if (route === "accounts") renderAccounts();
-    if (route === "execution") { renderOrders(); renderReviews(); renderAudit(); }
-    if (route === "admin") {
-      const tab = parseHash().id || "overview";
-      if (typeof window.__adminShow === "function") window.__adminShow(tab);
-    }
-    if (app.lang === "en") applyLang();
-  }
-
-  window.addEventListener("hashchange", function () {
-    const h = parseHash();
-    if (h.route !== app.route) go(h.route, false);
-    if (h.route === "admin" && app.route === "admin" && typeof window.__adminShow === "function") {
-      window.__adminShow(h.id || "overview");
-    }
-    if (h.route === "scanner" && h.id && D.events.some(e => e.id === h.id)) {
-      if (app.sel !== h.id) openDrawer(h.id);
-    } else if (!$("#drawer-root").hidden) {
-      closeDrawer();
-    }
-  });
-
-  /* ---------------- static bindings ---------------- */
-  $$(".nav-item").forEach(n => n.addEventListener("click", e => { e.preventDefault(); go(n.dataset.route); }));
-  $$("[data-nav]").forEach(el => el.addEventListener("click", () => go(el.dataset.nav)));
-
-  document.addEventListener("conv:open-account", e => {
-    const id = e.detail && e.detail.id;
-    if (id) void switchAccount(id, true);
-  });
-
-  $("#acct-btn").addEventListener("click", e => { e.stopPropagation(); toggleAcctMenu(); });
-  $("#acct-menu").addEventListener("click", e => {
-    const b = e.target.closest("[data-acct-switch]");
-    if (b) void switchAccount(b.dataset.acctSwitch);
-  });
-  document.addEventListener("click", e => {
-    const sw = $("#acct-switch");
-    if (sw && !sw.contains(e.target)) closeAcctMenu();
-  });
-  $("#acct-grid").addEventListener("click", e => {
-    const enter = e.target.closest("[data-acct-enter]");
-    if (enter) { void switchAccount(enter.dataset.acctEnter, true); return; }
-    const auto = e.target.closest("[data-acct-auto]");
-    if (auto) { void toggleAccountAuto(auto.dataset.acctAuto); return; }
-    const kill = e.target.closest("[data-acct-kill]");
-    if (kill) accountKillModal(kill.dataset.acctKill);
-  });
-  $("#acct-table").addEventListener("click", e => {
-    const goBtn = e.target.closest("[data-acct-enter]");
-    if (goBtn) { void switchAccount(goBtn.dataset.acctEnter, true); return; }
-    const row = e.target.closest("[data-acct-row]");
-    if (row) void switchAccount(row.dataset.acctRow, true);
-  });
-  $("#acct-refresh").addEventListener("click", async () => {
-    await D.refresh();
-    toast("快照已更新", "五个账户的净值、持仓与限额已重新同步。");
-  });
-
-  document.addEventListener("click", e => {
-    const t = e.target.closest("[data-toast]");
-    if (!t) return;
-    toast(t.classList.contains("venue-pill") ? "场所连接" : "账户设置", t.dataset.toast);
-  });
-
-  $("#auto-switch").addEventListener("click", async () => {
-    if (app.kill) { toast("熔断中", "请先解除本账户熔断。", "neg"); return; }
-    const acct = currentAcct();
-    if (acct && !acct.enabled) { toast("账户已停用", "请让管理员在后台重新启用该账户。", "neg"); return; }
-    const next = !app.auto;
-    try {
-      await api.post("/api/risk/auto", { enabled: next });
-    } catch (err) {
-      toast("操作失败", err.message, "neg");
-      return;
-    }
-    syncFromState();
-    updateSystem(); renderTable(); renderNav();
-    toast(next ? "该账户自动执行已开启" : "该账户自动执行已暂停",
-      acctCode(app.accountId) + " " + (acct ? acct.name : "") + " · " + (next ? "满足阈值的信号会直接进入两腿执行。" : "信号只推送，不自动下单。"),
-      next ? "ok" : "warn");
-  });
-
-  $("#kill-btn").addEventListener("click", killModal);
-  $("#kill-page-btn").addEventListener("click", killModal);
-
-  async function toggleSimulation() {
-    if (!D.user || D.user.role === "analyst") {
-      toast("无操作权限", "模拟交易开关仅管理员与交易员可操作。", "neg");
-      return;
-    }
-    const next = !paperEnabled();
-    try {
-      await api.post("/api/simulation", { accountId: app.accountId, enabled: next });
-    } catch (err) {
-      toast("操作失败", err.message || String(err), "neg");
-      return;
-    }
-    syncFromState();
-    updateSystem();
-    renderVenues();
-    if (app.route === "execution") renderOrders();
-    toast(next ? "模拟交易已开启" : "模拟交易已暂停",
-      next ? "新订单会按真实 PM / HL 盘口仿真成交，可在「持仓」观察盈亏。" : "新开仓已暂停；已有持仓仍可平仓与对齐。",
-      next ? "ok" : "warn");
-  }
-  $("#sim-switch").addEventListener("click", toggleSimulation);
-  $("#sim-strip-btn").addEventListener("click", toggleSimulation);
-
-  $("#banner-action").addEventListener("click", () => go(app.kill ? "risk" : "execution"));
-
-  $("#logout-btn").addEventListener("click", async () => {
-    try { await api.post("/api/auth/logout"); } catch { /* session may already be gone */ }
-    location.href = "/login";
-  });
-  $("#admin-btn").addEventListener("click", () => { go("admin"); });
-
-  $("#user-avatar").addEventListener("click", () => {
-    openModal({
-      title: "账户安全",
-      sub: D.user ? D.user.email + " · " + D.user.role : "",
-      body: '<div class="field"><label>当前密码</label><input type="password" id="pw-current" autocomplete="current-password"></div>' +
-        '<div class="field"><label>新密码</label><input type="password" id="pw-next" autocomplete="new-password"><span class="hint">至少 8 位；保存后其他会话会注销并要求重新登录。</span></div>',
-      actions: [
-        { label: "取消", kind: "btn-ghost" },
-        { label: "更新密码", kind: "btn-primary", onClick: function () {
-            const current = $("#pw-current").value;
-            const next = $("#pw-next").value;
-            if (next.length < 8) { toast("密码过短", "新密码至少 8 位。", "neg"); return false; }
-            void api.post("/api/auth/password", { current, next })
-              .then(() => { location.href = "/login"; })
-              .catch(err => toast("修改失败", err.message, "neg"));
-          } }
-      ]
-    });
-  });
-
-  ["#venue-pm", "#venue-hl"].forEach(sel => {
-    $(sel).addEventListener("click", () => {
-      const id = $(sel).dataset.venue;
-      const v = D.venues.find(x => x.id === id);
-      if (!v) return;
-      toast(v.label, v.message + (v.latencyMs != null ? " · " + v.latencyMs + "ms" : ""), v.state === "ok" ? "ok" : v.state === "down" ? "neg" : "warn");
-    });
-  });
-
-  $("#rescan-btn").addEventListener("click", async () => {
-    try {
-      const res = await api.post("/api/scanner/refresh");
-      syncFromState();
-      $("#scan-seq").textContent = "#" + (D.engine.scanSeq || app.scanSeq).toLocaleString("en-US");
-      renderTable(); renderNav(); renderOverview();
-      toast("扫描完成", `服务端重算 ${res.result?.events ?? D.events.length} 个事件，命中 ${computed().filter(r => r.net >= D.MIN_EDGE_CENTS).length} 个净边信号。`);
-    } catch (err) {
-      toast("扫描失败", err.message, "neg");
-    }
-  });
-
-  $("#q").addEventListener("input", e => { app.opp.q = e.target.value; renderTable(); });
-  $("#cat-chips").addEventListener("click", e => {
-    const b = e.target.closest("[data-cat]");
-    if (!b) return;
-    app.opp.cat = b.dataset.cat;
-    $$("#cat-chips .chip-btn").forEach(x => x.classList.toggle("is-on", x === b));
-    renderTable();
-  });
-  $("#min-edge").addEventListener("change", e => { app.opp.minEdge = Number(e.target.value); renderTable(); });
-  $("#horizon").addEventListener("change", e => { app.opp.horizon = e.target.value; renderTable(); });
-  $("#only-ready").addEventListener("click", e => {
-    app.opp.onlyReady = !app.opp.onlyReady;
-    e.currentTarget.setAttribute("aria-checked", String(app.opp.onlyReady));
-    renderTable();
-  });
-
-  $("#scan-mode").addEventListener("click", () => {
-    app.scanMode = !app.scanMode;
-    try { localStorage.setItem("conv.scanMode", app.scanMode ? "1" : "0"); } catch { /* storage may be disabled */ }
-    renderRadar();
-    toast(app.scanMode ? "扫描动画已开启" : "扫描动画已暂停",
-      app.scanMode ? "雷达会随每次扫描更新机会光点。" : "雷达扫描与光点已停止，数据表仍保留最后结果。",
-      app.scanMode ? "ok" : "warn");
-  });
-
-  const colMenu = $("#col-menu");
-  const colPop = $("#col-menu-pop");
-  const colBtn = $("#col-btn");
-  const setColMenu = open => {
-    if (!colPop || !colBtn) return;
-    colPop.hidden = !open;
-    colBtn.setAttribute("aria-expanded", String(open));
-  };
-  $$("#col-menu-pop [data-col]").forEach(input => { input.checked = app.cols[input.dataset.col] !== false; });
-  colBtn?.addEventListener("click", e => {
-    e.stopPropagation();
-    setColMenu(colPop.hidden);
-  });
-  colPop?.addEventListener("click", e => e.stopPropagation());
-  colPop?.addEventListener("change", e => {
-    const input = e.target.closest("[data-col]");
-    if (!input) return;
-    app.cols[input.dataset.col] = input.checked;
-    try { localStorage.setItem("conv.cols", JSON.stringify(app.cols)); } catch { /* storage may be disabled */ }
-    applyCols();
-  });
-  document.addEventListener("click", () => setColMenu(false));
-  document.addEventListener("keydown", e => { if (e.key === "Escape") setColMenu(false); });
-  window.addEventListener("resize", applyCols);
-  $("#reset-filters").addEventListener("click", () => {
-    app.opp = { q: "", cat: "all", minEdge: 2.5, horizon: "all", onlyReady: false, sortKey: "edge", sortDir: "desc" };
-    $("#q").value = "";
-    $("#min-edge").value = "2.5";
-    $("#horizon").value = "all";
-    $("#only-ready").setAttribute("aria-checked", "false");
-    $$("#cat-chips .chip-btn").forEach(x => x.classList.toggle("is-on", x.dataset.cat === "all"));
-    renderTable();
-  });
-
-  $("#opp-table thead").addEventListener("click", e => {
-    const th = e.target.closest("th[data-sort]");
-    if (!th) return;
-    const k = th.dataset.sort;
-    if (app.opp.sortKey === k) app.opp.sortDir = app.opp.sortDir === "desc" ? "asc" : "desc";
-    else { app.opp.sortKey = k; app.opp.sortDir = k === "due" || k === "title" ? "asc" : "desc"; }
-    renderTable();
-  });
-
-  $("#opp-body").addEventListener("click", e => {
-    const tr = e.target.closest("tr[data-id]");
-    if (!tr) return;
-    openDrawer(tr.dataset.id);
-  });
-  $("#opp-body").addEventListener("keydown", e => {
-    if (e.key !== "Enter" || !e.target.matches("tr[data-id]")) return;
-    openDrawer(e.target.dataset.id);
-  });
-
-  $("#radar-list").addEventListener("click", e => {
-    const row = e.target.closest("[data-open]");
-    if (row) openDrawer(row.dataset.open);
-  });
-
-  $("#opp-cards").addEventListener("click", e => {
-    const card = e.target.closest("[data-id]");
-    if (card) openDrawer(card.dataset.id);
-  });
-
-  $$(".seg-btn").forEach(b => b.addEventListener("click", () => {
-    $$(".seg-btn").forEach(x => x.setAttribute("aria-selected", "false"));
-    b.setAttribute("aria-selected", "true");
-    app.range = Number(b.dataset.range);
-    renderChart();
-  }));
-
-  $$(".tab").forEach(t => t.addEventListener("click", () => {
-    $$(".tab").forEach(x => x.setAttribute("aria-selected", "false"));
-    t.setAttribute("aria-selected", "true");
-    $$(".tab-panel").forEach(p => { p.hidden = p.dataset.panel !== t.dataset.tab; });
-  }));
-
-  $("#order-list").addEventListener("click", e => {
-    const archive = e.target.closest("[data-order-archive]");
-    if (archive) {
-      const id = archive.dataset.orderArchive;
-      void api.post(`/api/orders/${id}/archive`)
-        .then(() => { syncFromState(); renderOrders(); renderNav(); renderPositions(); toast("已归档", id + " 已写入审计日志，不再占用执行台。"); })
-        .catch(err => toast("归档失败", err.message, "neg"));
-      return;
-    }
-    const hedge = e.target.closest("[data-order-hedge]");
-    if (hedge) {
-      const id = hedge.dataset.orderHedge;
-      void api.post(`/api/orders/${id}/hedge`)
-        .then(() => { syncFromState(); renderOrders(); renderNav(); renderPositions(); toast("补对冲完成", id + " 的对冲缺口已补足，两条腿对齐。"); })
-        .catch(err => toast("补对冲失败", err.message, "neg"));
-      return;
-    }
-    const flat = e.target.closest("[data-order-flat]");
-    if (flat) {
-      const o = app.orders.find(x => x.id === flat.dataset.orderFlat);
-      if (!o) return;
-      const ev = D.event(o.evId) || { title: o.evId, und: "—" };
-      openModal({
-        title: "立即平仓",
-        sub: o.id + " · " + ev.title,
-        body: '<div class="kvbox"><div><span>合约腿</span><b>卖出 ' + Math.round(o.legs[0].filled).toLocaleString("en-US") + " YES</b></div>" +
-          "<div><span>对冲腿</span><b>平掉 " + Math.round(o.legs[1].filled).toLocaleString("en-US") + " " + ev.und + "-PERP</b></div>" +
-          '<div class="total"><span>预计滑点</span><b>8–14 bps</b></div></div>' +
-          '<div class="warn-box"><svg class="ic"><use href="#i-alert"/></svg><p>平仓会同时释放两条腿；若其中一条腿失败，系统会保留另一条并在 30 秒内重试。</p></div>',
+        eyebrow: "MARKET MAKING · 平仓", title: "平掉全部做市库存？",
+        body: '<p class="note">会按当前对手价逐市场平仓：多头卖在买价，空头买在卖价。已实现盈亏立即落账。</p>',
         actions: [
           { label: "取消", kind: "btn-ghost" },
-          { label: "确认平仓", kind: "btn-danger", onClick: function () {
-              void api.post(`/api/orders/${o.id}/flatten`)
-                .then(() => { syncFromState(); renderOrders(); renderNav(); renderPositions(); renderOverview(); toast("平仓指令已提交", o.id + " 两条腿同时平仓，预计 12 秒内完成。", "warn"); })
-                .catch(err => toast("平仓失败", err.message, "neg"));
-            } }
+          { label: "确认平仓", kind: "btn-danger", onClick: async () => {
+            try { await api("/api/mm/flatten", { method: "POST", body: { accountId: "marketmaking" } }); toast("全部做市库存已平", "", "warn"); await loadState({ silent: true }); }
+            catch (err) { toast("平仓失败", err.message, "neg"); }
+          } }
         ]
       });
-    }
-  });
-
-  $("#review-list").addEventListener("click", e => {
-    const take = e.target.closest("[data-review-take]");
-    const flat = e.target.closest("[data-review-flat]");
-    const ignore = e.target.closest("[data-review-ignore]");
-    if (!take && !flat && !ignore) return;
-    const id = (take || flat || ignore).dataset[take ? "reviewTake" : flat ? "reviewFlat" : "reviewIgnore"];
-    const r = app.reviews.find(x => x.id === id);
-    if (!r) return;
-    const ev = D.event(r.evId) || { title: r.evId };
-    if (take) {
+    } else if (act === "edit-limit") openEditLimit(id);
+    else if (act === "reset-limits") { await api("/api/risk/limits/reset", { method: "POST", body: { accountId: S.account } }); toast("限额已恢复默认"); await loadState({ silent: true }); }
+    else if (act === "rule-toggle") await setRule(id, { on: el.dataset.on === "true" });
+    else if (act === "admin-reset") {
       openModal({
-        title: "接管 " + r.id,
-        sub: esc(ev.title),
-        body: '<div class="field"><label>处置方式</label><select id="take-action">' +
-            "<option value=\"shrink\">缩减规模，继续执行</option>" +
-            "<option value=\"abort\">放弃机会，回滚合约腿</option>" +
-            "<option value=\"hold\">保留裸敞口 30 分钟</option></select></div>" +
-          '<div class="warn-box"><svg class="ic"><use href="#i-alert"/></svg><p>接管后该订单不再受自动规则保护，<b>需要你在 30 分钟内</b>确认最终状态。</p></div>',
+        eyebrow: "ADMIN · 危险操作", title: "重置全部纸面数据？",
+        body: '<p class="note">清空两本账的转换、做市库存、成交、审计与净值曲线，两个账户回到各 10,000 USDC。用户与设置保留。</p>',
         actions: [
           { label: "取消", kind: "btn-ghost" },
-          { label: "确认接管", kind: "btn-primary", onClick: function () {
-              const mode = ($("#take-action") || {}).value || "shrink";
-              void api.post(`/api/reviews/${id}/take`, { mode })
-                .then(() => {
-                  syncFromState(); renderReviews(); renderNav(); renderOrders();
-                  toast("已接管 " + id, mode === "shrink" ? "已按盘口可成交规模重发第二腿。" : mode === "abort" ? "已发出回滚指令，合约腿将在 5 分钟内清仓。" : "保留裸敞口，30 分钟后再次提醒。", "warn");
-                })
-                .catch(err => toast("接管失败", err.message, "neg"));
-            } }
+          { label: "确认重置", kind: "btn-danger", onClick: async () => {
+            try { await api("/api/admin/data/reset", { method: "POST", body: { confirm: "RESET" } }); toast("纸面数据已重置"); await loadState(); }
+            catch (err) { toast("重置失败", err.message, "neg"); }
+          } }
         ]
       });
-    } else if (flat) {
-      void api.post(`/api/reviews/${id}/flatten`)
-        .then(() => { syncFromState(); renderReviews(); renderNav(); renderOrders(); renderPositions(); toast("已平仓 " + id, "两条腿已同时提交平仓，预计 12 秒完成。", "warn"); })
-        .catch(err => toast("平仓失败", err.message, "neg"));
-    } else {
-      void api.post(`/api/reviews/${id}/ignore`)
-        .then(() => { syncFromState(); renderReviews(); renderNav(); toast("已忽略 " + id, "已标记为已知风险，不再进入待接管队列。", "warn"); })
-        .catch(err => toast("操作失败", err.message, "neg"));
     }
-  });
-
-  $("#audit-chips").addEventListener("click", e => {
-    const b = e.target.closest("[data-actor]");
-    if (!b) return;
-    app.auditActor = b.dataset.actor;
-    $$("#audit-chips .chip-btn").forEach(x => x.classList.toggle("is-on", x === b));
-    renderAudit();
-  });
-
-  $("#pos-body").addEventListener("click", e => {
-    const align = e.target.closest("[data-align]");
-    if (align) { e.stopPropagation(); alignHedge(align.dataset.align); return; }
-    const row = e.target.closest("tr[data-pos]");
-    if (!row) return;
-    app.expanded = app.expanded === row.dataset.pos ? null : row.dataset.pos;
-    renderPositions();
-  });
-  $("#pos-body").addEventListener("keydown", e => {
-    if (e.key !== "Enter" || !e.target.matches("tr[data-pos]")) return;
-    e.preventDefault();
-    app.expanded = app.expanded === e.target.dataset.pos ? null : e.target.dataset.pos;
-    renderPositions();
-  });
-
-  $$("[data-pos-filter]").forEach(b => b.addEventListener("click", () => {
-    app.posFilter = b.dataset.posFilter;
-    $$("[data-pos-filter]").forEach(x => x.classList.toggle("is-on", x === b));
-    renderPositions();
-  }));
-
-  $("#hedge-all-btn").addEventListener("click", async () => {
-    if (!guard()) return;
-    const b = book();
-    const need = b.rows.filter(r => r.ratio < 0.999);
-    if (!need.length) { toast("无需操作", "所有头寸的对冲比例都已在目标附近。"); return; }
-    try {
-      const res = await api.post("/api/positions/align-all");
-      syncFromState();
-      renderPositions(); renderOverview(); renderNav();
-      toast("对冲腿已对齐", (res.count || need.length) + " 个头寸补足，净 Delta 敞口回到限额内。");
-    } catch (err) {
-      toast("批量补对冲失败", err.message, "neg");
-    }
-  });
-
-  $("#flatten-all-btn").addEventListener("click", () => {
-    const b = book();
-    const legs = b.rows.length * 2;
-    const openOrders = app.orders.filter(o => o.status !== "filled").length;
-    openModal({
-      title: "平掉全部头寸？",
-      sub: b.rows.length + " 个事件 · " + legs + " 条腿同时提交，按当前盘口估计滑点 12–18bps。",
-      body: '<div class="kvbox">' +
-          "<div><span>持仓事件</span><b>" + b.rows.length + " 个 · 名义 " + compactUsd(b.face) + "</b></div>" +
-          "<div><span>进行中订单</span><b>" + openOrders + " 笔</b></div>" +
-          "<div><span>待接管</span><b>" + app.reviews.length + " 笔</b></div>" +
-          '<div class="total"><span>当前未实现</span><b>' + signedUsd(b.pnl, 0) + "</b></div></div>" +
-        '<div class="warn-box"><svg class="ic"><use href="#i-alert"/></svg><p>此操作<b>不可撤销</b>，会在 Polymarket 与 Hyperliquid 同时产生市价单，并把持仓账本清零。建议在盘口深度正常时执行。</p></div>',
-      actions: [
-        { label: "取消", kind: "btn-ghost" },
-        { label: "确认全部平仓", kind: "btn-danger", onClick: function () {
-            void api.post("/api/flatten-all")
-              .then(() => {
-                syncFromState(); app.expanded = null;
-                renderOrders(); renderReviews(); renderPositions(); renderOverview(); renderTable(); renderRisk(); renderNav();
-                toast("全组合已平仓", "执行台与持仓账本已清零，平仓结果已写入审计日志。", "warn");
-              })
-              .catch(err => toast("全部平仓失败", err.message, "neg"));
-          } }
-      ]
-    });
-  });
-
-  $("#new-pos-btn").addEventListener("click", () => {
-    if (!guard()) return;
-    const ready = computed().filter(d => d.status === "ready" || d.status === "active").sort((a, b) => b.net - a.net).slice(0, 8);
-    openModal({
-      title: "建立对冲组合",
-      sub: "手动选择事件与规模，系统会同时提交两条腿。",
-      body: '<div class="field"><label>事件</label><select id="np-event">' +
-          ready.map(d => '<option value="' + d.id + '">' + esc(d.title) + " · 净边 " + signedCents(d.net) + "</option>").join("") +
-          '</select></div>' +
-        '<div class="field"><label>合约腿成本（USDC）</label><input type="number" id="np-size" value="25000" min="1000" step="1000">' +
-          '<span class="hint">对冲腿按真实二元期权 Delta（面值倍数）自动计算</span></div>' +
-        '<div class="kvbox" id="np-preview"></div>',
-      actions: [
-        { label: "取消", kind: "btn-ghost" },
-        { label: "建立组合", kind: "btn-primary", onClick: function () {
-            const id = $("#np-event").value;
-            const size = Number($("#np-size").value);
-            if (!size || size < 1000) { toast("规模过小", "最低 1,000 USDC。", "neg"); return false; }
-            void api.post("/api/positions", { eventId: id, sizeUsd: size })
-              .then(() => {
-                syncFromState(); renderPositions(); renderTable(); renderOverview(); renderNav();
-                const ev = D.event(id);
-                toast("组合已建立", (ev ? ev.title : id) + " 两条腿已提交，头寸已进入持仓账本。");
-                go("positions");
-              })
-              .catch(err => toast("建立组合失败", err.message, "neg"));
-          } }
-      ],
-      onMount: function (modal) {
-        const update = () => {
-          const ev = D.event($("#np-event", modal).value);
-          if (!ev) return;
-          const d = D.derive(ev);
-          const size = Number($("#np-size", modal).value) || 0;
-          const qty = Math.floor(size / d.ask / 100) * 100;
-          $("#np-preview", modal).innerHTML =
-            "<div><span>合约腿</span><b>" + qty.toLocaleString("en-US") + " YES @ " + cents(d.ask) + "</b></div>" +
-            "<div><span>对冲腿</span><b>" + usd(qty * Math.abs(d.delta) * 0.96, 0) + " " + esc(ev.und) + "-PERP</b></div>" +
-            "<div><span>预计净边</span><b>" + bps(d.netBps) + " bps</b></div>" +
-            '<div class="total"><span>预期收益</span><b>' + signedUsd(qty * d.net / 100, 0) + "</b></div>";
-        };
-        $("#np-event", modal).addEventListener("change", update);
-        $("#np-size", modal).addEventListener("input", update);
-        update();
-      }
-    });
-  });
-
-  $("#limit-list").addEventListener("click", e => {
-    const edit = e.target.closest("[data-limit-edit]");
-    if (edit) { app.editingLimit = edit.dataset.limitEdit; updateRiskLimits(); return; }
-    const save = e.target.closest("[data-limit-save]");
-    if (save) { saveLimit(save.dataset.limitSave); return; }
-    if (e.target.closest("[data-limit-cancel]")) { app.editingLimit = null; updateRiskLimits(); }
-  });
-
-  $("#reset-limits").addEventListener("click", async () => {
-    try {
-      await api.post("/api/risk/limits/reset");
-      syncFromState();
-      app.editingLimit = null;
-      updateRiskLimits(); renderOverview(); renderNav();
-      toast("限额已恢复默认", "所有限额回到策略基准值，已同步至下单前校验。");
-    } catch (err) {
-      toast("恢复默认失败", err.message, "neg");
-    }
-  });
-
-  $("#rule-list").addEventListener("click", e => {
-    const b = e.target.closest("[data-rule]");
-    if (!b) return;
-    const r = app.rules.find(x => x.id === b.dataset.rule);
-    if (!r) return;
-    const next = !r.on;
-    void api.patch(`/api/risk/rules/${encodeURIComponent(r.id)}`, { on: next })
-      .then(() => {
-        syncFromState();
-        renderRules(); renderRisk();
-        toast(next ? "规则已启用" : "规则已关闭", r.name + (next ? " 已重新参与下单校验。" : " 关闭期间不会拦截任何订单，请确认风险可控。"), next ? "ok" : "warn");
-      })
-      .catch(err => toast("规则更新失败", err.message, "neg"));
-  });
-
-  $("#rule-list").addEventListener("change", e => {
-    const input = e.target.closest("[data-rule-value]");
-    if (!input) return;
-    const r = app.rules.find(x => x.id === input.dataset.ruleValue);
-    if (!r) return;
-    const value = Number(input.value);
-    if (!Number.isFinite(value)) { input.value = String(r.value ?? ""); toast("阈值无效", "请输入数字。", "neg"); return; }
-    void api.patch(`/api/risk/rules/${encodeURIComponent(r.id)}`, { value })
-      .then(() => {
-        syncFromState();
-        renderRules(); renderRisk(); renderTable(); renderNav(); renderOverview();
-        toast("阈值已更新", r.name + " → " + value + (ruleUnit(r.id) || "") + "；仅作用于当前账户。", "ok");
-      })
-      .catch(err => {
-        input.value = String(r.value ?? "");
-        toast("阈值更新失败", err.message, "neg");
-      });
-  });
-
-  $("#export-btn").addEventListener("click", async () => {
-    const o = app.opp;
-    const params = new URLSearchParams({
-      q: o.q, cat: o.cat, minEdge: String(o.minEdge), horizon: o.horizon, onlyReady: String(o.onlyReady)
-    });
-    try {
-      await download("/api/export/opportunities.csv?" + params.toString(), "convergence-opportunities-" + D.meta.date + ".csv");
-      toast("日报已导出", "服务端生成了 CSV，含净边、对冲规模与状态。");
-    } catch (err) {
-      toast("导出失败", err.message, "neg");
-    }
-  });
-
-  $("#sync-btn").addEventListener("click", async () => {
-    try {
-      const health = await api.get("/api/health");
-      await D.refresh({ silent: true });
-      syncFromState();
-      renderPulse(); renderVenues(); renderOrders(); renderPositions(); renderNav();
-      toast("场所已同步", `Polymarket ${health.venues?.[1]?.state ?? "未知"} · Hyperliquid ${health.venues?.[0]?.state ?? "未知"} · 事件 ${health.universe} 个。`);
-    } catch (err) {
-      toast("同步失败", err.message, "neg");
-    }
-  });
-
-  $(".drawer-scrim").addEventListener("click", () => closeDrawer());
-  $(".modal-scrim").addEventListener("click", () => closeModal());
-
-  $("#rail-collapse")?.addEventListener("click", () => {
-    app.railCollapsed = !app.railCollapsed;
-    try { localStorage.setItem("conv.railCollapsed", app.railCollapsed ? "1" : "0"); } catch { /* storage may be disabled */ }
-    $(".app")?.classList.toggle("is-collapsed", app.railCollapsed);
-    syncLangButtons();
-  });
-  $$("#rail-tools [data-lang]").forEach(btn => btn.addEventListener("click", () => {
-    const collapsed = $(".app")?.classList.contains("is-collapsed") || window.matchMedia("(max-width: 1200px)").matches;
-    setLanguage(collapsed ? (app.lang === "en" ? "zh" : "en") : btn.dataset.lang);
-  }));
-  $("#lang-mobile")?.addEventListener("click", () => setLanguage(app.lang === "en" ? "zh" : "en"));
-
-  document.addEventListener("keydown", e => {
-    if (e.key === "Escape") {
-      closeAcctMenu();
-      if (!$("#modal-root").hidden) { closeModal(); return; }
-      if (!$("#admin-modal").hidden) { return; }
-      if (!$("#drawer-root").hidden) { closeDrawer(); return; }
-    }
-    if (!$("#modal-root").hidden || !$("#drawer-root").hidden || !$("#admin-modal").hidden) return;
-    const tag = (document.activeElement && document.activeElement.tagName) || "";
-    if (/INPUT|SELECT|TEXTAREA/.test(tag)) return;
-    if (e.metaKey || e.ctrlKey || e.altKey) return;
-    const map = { "1": "overview", "2": "accounts", "3": "scanner", "4": "execution", "5": "positions", "6": "risk", "7": "admin" };
-    if (map[e.key]) {
-      if (e.key === "7" && (!D.user || D.user.role !== "admin")) return;
-      e.preventDefault();
-      go(map[e.key]);
-    }
-  });
-
-  /* ---------------- live loop ---------------- */
-  function tickClock() {
-    $("#clock").textContent = clockStr();
-    const lastScan = D.engine.lastScanAt || Date.now();
-    const ago = Math.max(0, (D.now() - lastScan) / 1000);
-    $("#scan-ago").textContent = ago.toFixed(1) + "s 前";
-    $("#last-scan").textContent = ago.toFixed(1) + "s 前";
-    $("#radar-updated").textContent = ago.toFixed(1) + "s";
-    if ($("#sync-latency")) $("#sync-latency").textContent = Math.max(0, (Date.now() - D.lastUpdatedAt()) / 1000).toFixed(1) + "s";
-    const seq = $("#scan-seq");
-    if (seq && D.engine.scanSeq) seq.textContent = "#" + Number(D.engine.scanSeq).toLocaleString("en-US");
-
-    $$("[data-countdown]").forEach(el => {
-      const r = app.reviews.find(x => x.id === el.dataset.countdown);
-      if (!r) return;
-      const seconds = r.deadline ? Math.max(0, Math.ceil((r.deadline - D.now()) / 1000)) : r.seconds;
-      el.textContent = countdown(seconds);
-    });
-
-    const meta = $("#ex-review-meta");
-    if (meta && app.reviews.length) {
-      const min = app.reviews.reduce((m, r) => Math.min(m, r.deadline ? (r.deadline - D.now()) / 1000 : r.seconds), Infinity);
-      meta.textContent = "最早 " + countdown(Math.max(0, min)) + " 后自动平仓";
-    }
+  } catch (err) {
+    toast("操作失败", err.message, "neg");
   }
+});
 
-  function tickQuotes() {
-    syncFromState();
-    renderPulse();
-    renderVenues();
-    updateSystem();
-    if (app.route === "scanner") updateLiveCells();
-    if (app.route === "overview") updateRadarCells();
-  }
+document.addEventListener("change", e => {
+  const input = e.target.closest("input[data-rule]");
+  if (!input) return;
+  const value = Number(input.value);
+  if (Number.isFinite(value)) setRule(input.dataset.rule, { value });
+});
 
-  let resizeTimer = null;
-  window.addEventListener("resize", () => {
-    clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(() => {
-      if (app.route === "overview") { renderChart(); renderSpark(); }
-    }, 160);
-  });
+function downloadCsv() {
+  const a = document.createElement("a");
+  a.href = "/api/export/opportunities.csv?account=negrisk";
+  a.download = "negrisk-baskets.csv";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
 
-  /* ---------------- boot ---------------- */
-  async function init() {
-    try {
-      await D.ready();
-    } catch (err) {
-      if (err && err.status === 401) return;
-      toast("连接失败", "无法从服务端加载状态：" + (err.message || err), "neg");
-      return;
-    }
-    syncFromState();
-    app.opp.minEdge = D.settings.minEdge ?? 2.5;
-    if ($("#min-edge")) $("#min-edge").value = String(app.opp.minEdge);
-    renderAll();
+$("#acct-btn").addEventListener("click", e => {
+  e.stopPropagation();
+  const menu = $("#acct-menu");
+  menu.hidden = !menu.hidden;
+  $("#acct-btn").setAttribute("aria-expanded", String(!menu.hidden));
+});
+$("#logout-btn").addEventListener("click", async () => {
+  try { await api("/api/auth/logout", { method: "POST", body: {} }); } catch { /* ignore */ }
+  location.href = "/login";
+});
+$("#sim-switch").addEventListener("click", async () => {
+  const next = S.data.settings.paperTradingEnabled === false;
+  try {
+    await api("/api/simulation", { method: "POST", body: { accountId: S.account, enabled: next } });
+    toast(next ? "模拟交易已开启" : "模拟交易已暂停", next ? "做市成交与转换恢复" : "只允许平仓", next ? "ok" : "warn");
+    await loadState({ silent: true });
+  } catch (err) { toast("操作失败", err.message, "neg"); }
+});
+$("#auto-switch").addEventListener("click", () => toggleAuto(S.account));
+$("#kill-btn").addEventListener("click", () => killConfirm(S.account));
+$("#banner-action").addEventListener("click", () => go("risk"));
+$("#nav-admin").addEventListener("click", e => { e.preventDefault(); go("admin"); });
 
-    D.on(({ type }) => {
-      if (type === "state") {
-        renderAll();
-      } else {
-        tickQuotes();
-      }
-    });
+/* ---------------- boot ---------------- */
+window.addEventListener("hashchange", () => {
+  const route = routeFromHash();
+  if (route !== S.route) go(route, false);
+});
+document.addEventListener("visibilitychange", () => { if (!document.hidden) loadState({ silent: true }); });
 
-    const h = parseHash();
-    go(h.route, false);
-    if (h.route === "scanner" && h.id && D.events.some(e => e.id === h.id)) {
-      setTimeout(function () { openDrawer(h.id); }, 40);
-    }
-
-    syncLangButtons();
-    applyLang();
-    startLangObserver();
-
-    setInterval(tickClock, 1000);
-    tickClock();
-  }
-
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
-  else init();
-})();
+async function boot() {
+  const me = await fetch("/api/auth/me", { credentials: "same-origin" }).then(r => r.json()).catch(() => null);
+  if (!me?.user) { location.href = "/login"; return; }
+  go(routeFromHash(), false);
+  await loadState();
+  setInterval(() => {
+    $("#clock").textContent = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+  }, 1000);
+  setInterval(() => {
+    if (!document.hidden && !S.modalOpen) loadState({ silent: true });
+  }, 5000);
+}
+boot();

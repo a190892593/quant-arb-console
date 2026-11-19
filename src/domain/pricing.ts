@@ -1,5 +1,5 @@
 import type { Book, CostConfig, DerivedEvent, EventContract, Market, Position, PositionView, AccountId } from "./types.js";
-import { accountDef, CONVERGE_MIN_FAIR, LATENCY_MIN_AGE_MS } from "./accounts.js";
+import { accountDef } from "./accounts.js";
 
 export const DEFAULT_COST: CostConfig = {
   hlFeeBps: 4.5,
@@ -48,7 +48,7 @@ export function derive(ev: EventContract, ctx: DeriveContext = {}): DerivedEvent
   const nowMs = ctx.now ?? Date.now();
   const market = ctx.market ?? {};
   const cost = costConfig(ctx.cost);
-  const strategy = ctx.strategy ?? "prob";
+  const strategy = ctx.strategy ?? "negrisk";
   const minEdge = ctx.minEdge ?? MIN_EDGE_CENTS;
   const quoteAgeMs = Math.max(0, ctx.quoteAgeMs ?? ev.quoteAgeMs ?? 0);
   const dueMs = Date.parse(ev.due);
@@ -60,9 +60,7 @@ export function derive(ev: EventContract, ctx: DeriveContext = {}): DerivedEvent
   const hedgeRatio = Math.abs(ev.delta);
   const feeBps = cost.hlFeeBps * hedgeRatio;
   const slipBps = cost.hedgeSlipBps * hedgeRatio;
-  const fundingBps = strategy === "latency"
-    ? 0
-    : Math.min(cost.fundingCapBps, cost.fundingBpsDay * days) * hedgeRatio;
+  const fundingBps = Math.min(cost.fundingCapBps, cost.fundingBpsDay * days) * hedgeRatio;
   const resBps = cost.resolutionBps;
   const costBps = spreadBps + feeBps + slipBps + fundingBps + resBps;
   const grossBps = gross * 100;
@@ -85,16 +83,7 @@ export function derive(ev: EventContract, ctx: DeriveContext = {}): DerivedEvent
   } else if (grossBps > fatEdgeBps) {
     status = "review";
     statusText = "待复核";
-  } else if (strategy === "converge" && ev.fair < CONVERGE_MIN_FAIR) {
-    status = "watch";
-    statusText = "未进入收敛区";
-  } else if (strategy === "latency" && quoteAgeMs < LATENCY_MIN_AGE_MS) {
-    status = "watch";
-    statusText = "报价已追平";
-  } else if (strategy === "longvol" && days <= 60) {
-    status = "watch";
-    statusText = "不在长端区间";
-  } else if (days < 1.2 && strategy === "prob") {
+  } else if (days < 1.2) {
     status = "watch";
     statusText = "临近结算";
   } else if (ctx.settleFreezeDays && ctx.settleFreezeDays > 0 && days < ctx.settleFreezeDays) {

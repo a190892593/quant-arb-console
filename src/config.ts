@@ -117,7 +117,7 @@ export function liveTradingConfigured(): LiveConfigStatus {
 
 export function publicConfig() {
   return {
-    version: "2.2.0",
+    version: "3.0.0",
     marketDataMode: config.marketDataMode,
     tradingMode: config.tradingMode,
     hl: { enabled: config.hl.enabled, testnet: config.hl.testnet, apiUrl: config.hl.apiUrl },

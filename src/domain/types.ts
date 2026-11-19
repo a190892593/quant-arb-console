@@ -1,8 +1,9 @@
 export type Role = "admin" | "trader" | "analyst";
 export type EventStatus = "ready" | "watch" | "review" | "active";
 export type EventSource = "demo" | "polymarket";
-export type AccountId = "prob" | "converge" | "latency" | "longvol" | "complete";
+export type AccountId = "negrisk" | "marketmaking";
 export type StrategyId = AccountId;
+export type DeskKind = "negrisk" | "marketmaking";
 
 export interface AccountSettings {
   id: AccountId;
@@ -105,7 +106,7 @@ export interface EventContract {
   conf: number;
   delta: number;
   src: string;
-  kind?: "binary" | "complete";
+  kind?: "binary" | "complete" | "negrisk";
   source: EventSource;
   model?: ModelSpec;
   external?: ExternalRef;
@@ -295,7 +296,7 @@ export interface Rule {
   desc: string;
   on: boolean;
   value?: number;
-  unit?: "days" | "pct" | "bps" | "usd" | "ms" | "shares" | "x" | "sec" | "score";
+  unit?: "days" | "pct" | "bps" | "usd" | "ms" | "shares" | "x" | "sec" | "score" | "count";
   min?: number;
   max?: number;
   step?: number;
@@ -340,4 +341,178 @@ export interface EngineStatus {
 
 export interface SessionUser extends User {
   csrf: string;
+}
+
+/* ============================================================
+   Desk 1 · NegRisk conversion (protocol-level arbitrage)
+   ============================================================ */
+
+export interface NegRiskOutcome {
+  name: string;
+  yesTokenId: string;
+  noTokenId: string;
+  yesBid: number;
+  yesAsk: number;
+  noAsk: number;
+  noBid: number;
+  liquidity: number;
+}
+
+export interface NegRiskOpportunity {
+  id: string;
+  title: string;
+  slug: string;
+  negRiskMarketId: string;
+  due: string;
+  outcomes: NegRiskOutcome[];
+  n: number;
+  sumYesBid: number;
+  sumNoAsk: number;
+  basketCost: number;
+  conversionProceeds: number;
+  profit: number;
+  profitPct: number;
+  edgeBps: number;
+  maxSets: number;
+  feeBps: number;
+  status: "ready" | "watch";
+  reason: string;
+  updatedAt: number;
+}
+
+export interface ConversionLeg {
+  outcome: string;
+  noAsk: number;
+  yesBid: number;
+  noShares: number;
+  yesShares: number;
+}
+
+export interface Conversion {
+  id: string;
+  accountId: AccountId;
+  opportunityId: string;
+  title: string;
+  slug: string;
+  due: string;
+  n: number;
+  sets: number;
+  cost: number;
+  proceeds: number;
+  fee: number;
+  profit: number;
+  edgeBps: number;
+  createdAt: number;
+  legs: ConversionLeg[];
+  status: "locked";
+  mode: "paper";
+  note: string;
+}
+
+/* ============================================================
+   Desk 2 · High-liquidity market making
+   ============================================================ */
+
+export type MmStatus = "quoting" | "paused" | "inventory" | "idle" | "halted";
+
+export interface MmMarket {
+  id: string;
+  conditionId: string;
+  title: string;
+  slug: string;
+  category: string;
+  due: string;
+  yesTokenId: string;
+  noTokenId: string;
+  bestBid: number;
+  bestAsk: number;
+  bidSize: number;
+  askSize: number;
+  mid: number;
+  fair: number;
+  spreadBps: number;
+  depthUsd: number;
+  liquidity: number;
+  volume24h: number;
+  quoteBid: number;
+  quoteAsk: number;
+  quoteSize: number;
+  quoteNotional: number;
+  quoteAt: number;
+  inventory: number;
+  avg: number;
+  realized: number;
+  unrealized: number;
+  fills: number;
+  skewBps: number;
+  edgeBps: number;
+  paused: boolean;
+  status: MmStatus;
+  statusText: string;
+  lastFillAt: number | null;
+  updatedAt: number;
+}
+
+export interface MmFill {
+  id: string;
+  accountId: AccountId;
+  marketId: string;
+  title: string;
+  side: "buy" | "sell";
+  price: number;
+  size: number;
+  notional: number;
+  edgeBps: number;
+  inventoryAfter: number;
+  fee: number;
+  realized: number;
+  kind: "maker" | "flatten";
+  createdAt: number;
+}
+
+export interface MmPosition {
+  marketId: string;
+  title: string;
+  inventory: number;
+  avg: number;
+  realized: number;
+  fees: number;
+  fills: number;
+  paused: boolean;
+  lastFillAt: number | null;
+  updatedAt: number;
+}
+
+export interface MmParams {
+  targetEdgeBps: number;
+  minSpreadBps: number;
+  quoteNotional: number;
+  maxInventoryUsd: number;
+  maxMarkets: number;
+  minLiquidity: number;
+  skewStrength: number;
+  adverseStopBps: number;
+  flattenPct: number;
+  feeBps: number;
+}
+
+export interface MmTotals {
+  quoted: number;
+  markets: number;
+  inventoryUsd: number;
+  grossInventoryUsd: number;
+  realized: number;
+  unrealized: number;
+  fills: number;
+  quoteNotional: number;
+}
+
+export interface MmSnapshot {
+  markets: MmMarket[];
+  fills: MmFill[];
+  positions: MmPosition[];
+  totals: MmTotals;
+  params: MmParams;
+  updatedAt: number;
+  halted: boolean;
 }

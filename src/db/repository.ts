@@ -2,10 +2,9 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type {
-  AccountId, AuditEntry, CalendarItem, EquityPoint, EventContract, FeedItem, Limit, Order, Position,
-  Review, RiskEvent, Rule, User, UserRow
+  AccountId, AuditEntry, CalendarItem, Conversion, EquityPoint, EventContract, FeedItem, Limit, MmFill, MmPosition, Order,
+  Position, Review, RiskEvent, Rule, User, UserRow
 } from "../domain/types.js";
-import { RULE_DEFS } from "../domain/risk.js";
 
 type SqlValue = string | number | null | bigint | Uint8Array;
 
@@ -107,6 +106,31 @@ CREATE TABLE IF NOT EXISTS calendar (
   sort INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (account_id, ev_id)
 );
+
+CREATE TABLE IF NOT EXISTS conversions (
+  id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  data TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_conversions_account ON conversions(account_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS mm_positions (
+  account_id TEXT NOT NULL,
+  market_id TEXT NOT NULL,
+  data TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (account_id, market_id)
+);
+
+CREATE TABLE IF NOT EXISTS mm_fills (
+  id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  data TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mm_fills_account ON mm_fills(account_id, created_at DESC);
 `;
 
 function parseJson<T>(text: string | null | undefined, fallback: T): T {
@@ -340,6 +364,54 @@ export class Repository {
     else this.run("DELETE FROM positions");
   }
 
+  /* ---------------- NegRisk conversion ledger ---------------- */
+  conversionsAll(accountId?: AccountId, limit = 200): Conversion[] {
+    const rows = accountId
+      ? this.all<{ data: string }>("SELECT data FROM conversions WHERE account_id=? ORDER BY created_at DESC LIMIT ?", accountId, limit)
+      : this.all<{ data: string }>("SELECT data FROM conversions ORDER BY created_at DESC LIMIT ?", limit);
+    return rows.map(r => parseJson<Conversion | null>(r.data, null)).filter((c): c is Conversion => c !== null);
+  }
+  conversionAdd(c: Conversion): void {
+    const now = Date.now();
+    this.run(`INSERT INTO conversions(id,account_id,data,created_at,updated_at) VALUES(?,?,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at`,
+      c.id, c.accountId, JSON.stringify(c), c.createdAt ?? now, now);
+  }
+  conversionsClear(accountId?: AccountId): void {
+    if (accountId) this.run("DELETE FROM conversions WHERE account_id=?", accountId);
+    else this.run("DELETE FROM conversions");
+  }
+
+  /* ---------------- Market-making inventory / fills ---------------- */
+  mmPositionsAll(accountId: AccountId): MmPosition[] {
+    return this.all<{ data: string }>("SELECT data FROM mm_positions WHERE account_id=? ORDER BY market_id", accountId)
+      .map(r => parseJson<MmPosition | null>(r.data, null))
+      .filter((p): p is MmPosition => p !== null);
+  }
+  mmPositionUpsert(accountId: AccountId, p: MmPosition): void {
+    this.run(`INSERT INTO mm_positions(account_id,market_id,data,updated_at) VALUES(?,?,?,?)
+      ON CONFLICT(account_id,market_id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at`,
+      accountId, p.marketId, JSON.stringify(p), Date.now());
+  }
+  mmFillsAll(accountId?: AccountId, limit = 200): MmFill[] {
+    const rows = accountId
+      ? this.all<{ data: string }>("SELECT data FROM mm_fills WHERE account_id=? ORDER BY created_at DESC LIMIT ?", accountId, limit)
+      : this.all<{ data: string }>("SELECT data FROM mm_fills ORDER BY created_at DESC LIMIT ?", limit);
+    return rows.map(r => parseJson<MmFill | null>(r.data, null)).filter((f): f is MmFill => f !== null);
+  }
+  mmFillAdd(f: MmFill): void {
+    this.run(`INSERT INTO mm_fills(id,account_id,data,created_at) VALUES(?,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET data=excluded.data`, f.id, f.accountId, JSON.stringify(f), f.createdAt ?? Date.now());
+  }
+  mmFillsClear(accountId?: AccountId): void {
+    if (accountId) this.run("DELETE FROM mm_fills WHERE account_id=?", accountId);
+    else this.run("DELETE FROM mm_fills");
+  }
+  mmPositionsClear(accountId?: AccountId): void {
+    if (accountId) this.run("DELETE FROM mm_positions WHERE account_id=?", accountId);
+    else this.run("DELETE FROM mm_positions");
+  }
+
   ordersAll(accountId?: AccountId): Order[] {
     const rows = accountId
       ? this.all<{ data: string }>("SELECT data FROM orders WHERE account_id=? ORDER BY created_at DESC", accountId)
@@ -457,18 +529,7 @@ export class Repository {
     this.run("UPDATE limits SET value=? WHERE account_id=? AND id=?", value, accountId, id);
   }
   rulesAll(accountId: AccountId): Rule[] {
-    const rows = this.all<RuleRow>("SELECT id,name,descr,onoff,value,sort FROM rules WHERE account_id=? ORDER BY sort", accountId);
-    const byId = new Map(rows.map(r => [r.id, r]));
-    return RULE_DEFS.map(def => {
-      const row = byId.get(def.id);
-      return {
-        ...def,
-        name: def.name,
-        desc: def.desc,
-        on: row ? !!row.onoff : def.on,
-        value: row?.value ?? def.value
-      };
-    });
+    return this.rulesStored(accountId);
   }
   rulesStored(accountId: AccountId): Rule[] {
     return this.all<RuleRow>("SELECT id,name,descr,onoff,value,sort FROM rules WHERE account_id=? ORDER BY sort", accountId)
@@ -482,7 +543,7 @@ export class Repository {
     });
   }
   ruleUpsert(accountId: AccountId, rule: Rule): void {
-    const sort = Math.max(0, RULE_DEFS.findIndex(d => d.id === rule.id));
+    const sort = 0;
     this.run(
       `INSERT INTO rules(account_id,id,name,descr,onoff,value,sort) VALUES(?,?,?,?,?,?,?)
        ON CONFLICT(account_id,id) DO UPDATE SET onoff=excluded.onoff, value=excluded.value`,
@@ -532,28 +593,27 @@ export class Repository {
 
   clearTradingState(accountId?: AccountId): void {
     this.tx(() => {
+      const tables = ["positions", "orders", "reviews", "conversions", "mm_positions", "mm_fills"];
       if (accountId) {
-        for (const table of ["positions", "orders", "reviews"]) {
-          this.run(`DELETE FROM ${table} WHERE account_id=?`, accountId);
-        }
+        for (const table of tables) this.run(`DELETE FROM ${table} WHERE account_id=?`, accountId);
       } else {
-        for (const table of ["positions", "orders", "reviews"]) this.run(`DELETE FROM ${table}`);
+        for (const table of tables) this.run(`DELETE FROM ${table}`);
       }
     });
   }
 
   resetBusinessData(): void {
     this.tx(() => {
-      for (const table of ["positions", "orders", "reviews", "audit", "risk_events", "feed", "equity", "calendar"]) {
+      for (const table of ["positions", "orders", "reviews", "conversions", "mm_positions", "mm_fills", "audit", "risk_events", "feed", "equity", "calendar"]) {
         this.run(`DELETE FROM ${table}`);
       }
-      this.run("DELETE FROM meta WHERE key IN ('seededTrading','orderSeq','reviewSeq')");
+      this.run("DELETE FROM meta WHERE key IN ('seededTrading','orderSeq','reviewSeq','conversionSeq','mmFillSeq')");
     });
   }
 
   resetAll(): void {
     this.tx(() => {
-      for (const table of ["positions", "orders", "reviews", "audit", "risk_events", "feed", "equity", "calendar", "limits", "rules", "settings", "events", "sessions", "users", "meta"]) {
+      for (const table of ["positions", "orders", "reviews", "conversions", "mm_positions", "mm_fills", "audit", "risk_events", "feed", "equity", "calendar", "limits", "rules", "settings", "events", "sessions", "users", "meta"]) {
         this.run(`DELETE FROM ${table}`);
       }
     });

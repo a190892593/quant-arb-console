@@ -1,4 +1,4 @@
-/* ============================================================
+﻿/* ============================================================
    CONVERGENCE · API-backed client store
    The server is the single source of truth. This module keeps the
    last snapshot, exposes the same synchronous facade the renderer
@@ -21,6 +21,7 @@ const emptyState = {
   venues: [],
   market: {},
   events: [],
+  negRisk: [],
   bookEvents: [],
   positions: [],
   book: { rows: [], face: 0, cost: 0, hedge: 0, target: 0, pnl: 0, margin: 0, settle7: 0, maxCost: 0, byUnd: {}, netDelta: 0, unhedged: 0, undehedged: 0, nowMs: Date.now() },

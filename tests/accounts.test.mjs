@@ -1,59 +1,46 @@
-﻿import test from "node:test";
+import test from "node:test";
 import assert from "node:assert/strict";
-import { ACCOUNT_DEFS, eligibleFor, accountDef, LATENCY_MAX_DAYS } from "../dist/domain/accounts.js";
+import { ACCOUNT_DEFS, eligibleFor, accountDef, isAccountId, defaultAccountSettings, mergeAccountSettings } from "../dist/domain/accounts.js";
 
 const day = 86_400_000;
 const now = Date.parse("2026-11-19T00:00:00Z");
-const market = { BTC: { px: 100.1, chg: 0 }, ETH: { px: 2_000, chg: 0 } };
+const market = { BTC: { px: 100.1, chg: 0 } };
 
-function ev(days, overrides = {}) {
+function ev(days) {
   return {
     id: "e1", title: "BTC ≥ $100,000", cat: "BTC 价格", und: "BTC",
     due: new Date(now + days * day).toISOString(),
     ask: 0.48, bid: 0.47, fair: 0.5, depth: 100_000, conf: 90, delta: 0.2,
-    src: "test", source: "demo",
-    ...overrides
+    src: "test", source: "demo"
   };
 }
 
-test("accounts: exactly four defs and equities sum to the desk total", () => {
-  assert.equal(ACCOUNT_DEFS.length, 5);
-  assert.deepEqual(ACCOUNT_DEFS.map(a => a.id), ["prob", "converge", "latency", "longvol", "complete"]);
+test("accounts: exactly two deterministic desks", () => {
+  assert.equal(ACCOUNT_DEFS.length, 2);
+  assert.deepEqual(ACCOUNT_DEFS.map(a => a.id), ["negrisk", "marketmaking"]);
   const sum = ACCOUNT_DEFS.reduce((s, a) => s + a.defaultEquity, 0);
-  assert.ok(Math.abs(sum - 50_000) < 0.005, String(sum));
-  assert.equal(accountDef("latency").name, "报价滞后");
+  assert.ok(Math.abs(sum - 20_000) < 0.005, String(sum));
+  assert.equal(accountDef("negrisk").name, "NegRisk 转换");
+  assert.equal(accountDef("marketmaking").short, "MM");
+  assert.ok(isAccountId("marketmaking"));
+  assert.equal(isAccountId("prob"), false);
 });
 
-test("eligibility: probability desk only trades 1.2–60 days", () => {
-  assert.equal(eligibleFor("prob", ev(30), market, now), true);
-  assert.equal(eligibleFor("prob", ev(1), market, now), false);
-  assert.equal(eligibleFor("prob", ev(90), market, now), false);
-});
-
-test("eligibility: convergence desk needs ≤3 days and high fair", () => {
-  assert.equal(eligibleFor("converge", ev(2, { fair: 0.9 }), market, now), true);
-  assert.equal(eligibleFor("converge", ev(5, { fair: 0.9 }), market, now), false);
-  assert.equal(eligibleFor("converge", ev(2, { fair: 0.5 }), market, now), false);
-  assert.equal(eligibleFor("converge", ev(2, { fair: 0.999 }), market, now), false);
-});
-
-test("eligibility: latency desk needs stale quote, edge and a price move", () => {
-  const stale = { quoteAgeMs: 7_000, quoteRefPx: 100 };
-  assert.equal(eligibleFor("latency", ev(5, stale), market, now), true);
-  assert.equal(eligibleFor("latency", ev(5, { ...stale, quoteAgeMs: 1_000 }), market, now), false);
-  assert.equal(eligibleFor("latency", ev(LATENCY_MAX_DAYS + 1, stale), market, now), false);
-  assert.equal(eligibleFor("latency", ev(5, { ...stale, quoteRefPx: 100.1, fair: 0.49 }), market, now), false);
-  assert.equal(eligibleFor("latency", ev(5, { ...stale, fair: 0.485 }), market, now), false);
-});
-
-test("eligibility: long-vol desk only trades beyond 60 days", () => {
-  assert.equal(eligibleFor("longvol", ev(90), market, now), true);
-  assert.equal(eligibleFor("longvol", ev(61), market, now), true);
-  assert.equal(eligibleFor("longvol", ev(30), market, now), false);
-});
-
-test("eligibility: an expired contract is never eligible", () => {
-  for (const id of ["prob", "converge", "latency", "longvol", "complete"]) {
+test("accounts: the retired directional scanner never qualifies an event", () => {
+  for (const id of ["negrisk", "marketmaking"]) {
+    assert.equal(eligibleFor(id, ev(30), market, now), false, id);
     assert.equal(eligibleFor(id, ev(-1), market, now), false, id);
   }
+});
+
+test("accounts: persisted books merge onto the two current definitions", () => {
+  const seeded = defaultAccountSettings();
+  const merged = mergeAccountSettings([
+    { id: "negrisk", equity: 12_000, auto: false },
+    { id: "prob", equity: 99_999 }
+  ]);
+  assert.equal(merged.length, 2);
+  assert.equal(merged[0].equity, 12_000);
+  assert.equal(merged[0].auto, false);
+  assert.equal(merged[1].equity, seeded[1].equity);
 });

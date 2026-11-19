@@ -1,4 +1,4 @@
-﻿import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import fastifyCookie from "@fastify/cookie";
 import fastifyStatic from "@fastify/static";
 import rateLimit from "@fastify/rate-limit";
@@ -171,16 +171,16 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
     }
     return a;
   };
-  const stateFor = (a: AuthContext, accountId: AccountId = "prob") => buildState(repo, market, engine, {
+  const stateFor = (a: AuthContext, accountId: AccountId = "negrisk") => buildState(repo, market, engine, {
     id: a.user.id, email: a.user.email, name: a.user.name, role: a.user.role, csrf: a.csrf
   }, accountId);
-  const accountEnum = z.enum(["prob", "converge", "latency", "longvol"]);
+  const accountEnum = z.enum(["negrisk", "marketmaking"]);
   const accountFrom = (req: FastifyRequest, body?: unknown): AccountId => {
     const q = (req.query as Record<string, unknown> | undefined)?.account;
     if (isAccountId(q)) return q;
     const b = (body ?? req.body) as { accountId?: unknown } | undefined;
     if (b && isAccountId(b.accountId)) return b.accountId;
-    return "prob";
+    return "negrisk";
   };
 
   /* ---------------- HTML ---------------- */
@@ -300,146 +300,75 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
 
   app.get("/api/health", async () => ({
     ok: true,
-    version: "2.2.0",
+    version: "3.0.0",
     uptime: Math.round(process.uptime()),
     time: new Date().toISOString(),
     venues: [market.hlStatus, market.pmStatus],
     catalogMode: market.catalogMode,
-    universe: market.events.length
+    universe: market.negRisk.length + market.mmUniverse.length
   }));
 
-  /* ---------------- scanner / export ---------------- */
-  app.post("/api/scanner/refresh", async (req) => {
+  /* ---------------- desks ---------------- */
+  app.post("/api/negrisk/convert", async (req) => {
     const a = requireTrader(req);
-    const result = await engine.refreshCatalog(actorOf(a));
-    return { ok: true, result, state: stateFor(a, accountFrom(req)) };
+    const body = parse(z.object({
+      accountId: z.literal("negrisk"),
+      opportunityId: z.string().min(1).max(200),
+      sets: z.number().int().positive().max(5_000)
+    }), req.body);
+    const conversion = engine.executeConversion(actorOf(a), body.accountId, body.opportunityId, body.sets);
+    return { ok: true, conversion, state: stateFor(a, body.accountId) };
+  });
+
+  app.post("/api/negrisk/refresh", async (req) => {
+    const a = requireTrader(req);
+    const body = parse(z.object({ accountId: z.literal("negrisk").optional() }), req.body ?? {});
+    await market.refreshDesks(true);
+    return { ok: true, negRisk: market.negRisk.length, state: stateFor(a, body.accountId ?? "negrisk") };
+  });
+
+  app.post("/api/mm/refresh", async (req) => {
+    const a = requireTrader(req);
+    const body = parse(z.object({ accountId: z.literal("marketmaking") }), req.body);
+    await engine.refreshMm(body.accountId);
+    return { ok: true, state: stateFor(a, body.accountId) };
+  });
+
+  app.post("/api/mm/pause", async (req) => {
+    const a = requireTrader(req);
+    const body = parse(z.object({
+      accountId: z.literal("marketmaking"),
+      marketId: z.string().min(1).max(200),
+      paused: z.boolean()
+    }), req.body);
+    engine.setMmPaused(actorOf(a), body.accountId, body.marketId, body.paused);
+    return { ok: true, state: stateFor(a, body.accountId) };
+  });
+
+  app.post("/api/mm/flatten", async (req) => {
+    const a = requireTrader(req);
+    const body = parse(z.object({
+      accountId: z.literal("marketmaking"),
+      marketId: z.string().min(1).max(200).optional()
+    }), req.body);
+    const count = engine.flattenMm(actorOf(a), body.accountId, body.marketId);
+    return { ok: true, count, state: stateFor(a, body.accountId) };
   });
 
   app.get("/api/export/opportunities.csv", async (req, reply) => {
     auth(req);
-    const account = accountFrom(req);
-    const q = String((req.query as Record<string, unknown>)?.q ?? "").toLowerCase();
-    const cat = String((req.query as Record<string, unknown>)?.cat ?? "all");
-    const minEdge = Number((req.query as Record<string, unknown>)?.minEdge ?? 2.5);
-    const horizon = String((req.query as Record<string, unknown>)?.horizon ?? "all");
-    const onlyReady = String((req.query as Record<string, unknown>)?.onlyReady ?? "") === "true";
-    let rows = engine.derived(account);
-    if (q) rows = rows.filter(r => (r.title + r.cat + r.und + r.src).toLowerCase().includes(q));
-    if (cat !== "all") rows = rows.filter(r => r.cat === cat);
-    rows = rows.filter(r => r.net >= (Number.isFinite(minEdge) ? minEdge : 2.5));
-    if (horizon !== "all") rows = rows.filter(r => r.days <= Number(horizon));
-    if (onlyReady) rows = rows.filter(r => r.status === "ready");
-    const accountName = engine.accountSummaries().find(x => x.id === account)?.name ?? account;
-    const header = ["账户", "事件", "类别", "标的", "结算日", "剩余天数", "PM买价", "PM卖价", "HL公允", "毛边bps", "成本bps", "净边bps",
-      "持有期回报%", "简单年化%", "可成交USDC", "对冲USDC", "置信度", "状态"];
-    const lines = rows.map(r => [
-      accountName, `"${r.title.replace(/"/g, '""')}"`, r.cat, r.und, r.due.slice(0, 10), r.days.toFixed(1),
-      (r.bid * 100).toFixed(1), (r.ask * 100).toFixed(1), (r.fair * 100).toFixed(1),
-      Math.round(r.grossBps), Math.round(r.costBps), Math.round(r.netBps),
-      (r.holdReturn * 100).toFixed(2), (r.annualized > 999 ? ">999" : r.annualized.toFixed(1)),
-      Math.round(r.depth), Math.round(r.hedgeUsd), r.conf, r.statusText
+    const rows = market.negRisk;
+    const header = ["事件", "结果数", "ΣYES买价", "NO篮子成本", "转换卖出", "每组净利", "净利率%", "可转组数", "到期", "状态", "原因"];
+    const lines = rows.map(o => [
+      `"${o.title.replace(/"/g, '""')}"`, o.n, (o.sumYesBid * 100).toFixed(2),
+      o.basketCost.toFixed(4), o.conversionProceeds.toFixed(4), o.profit.toFixed(4),
+      (o.profitPct * 100).toFixed(3), o.maxSets, o.due.slice(0, 10), o.status === "ready" ? "可转换" : "观察",
+      `"${o.reason.replace(/"/g, '""')}"`
     ].join(","));
     const csv = "\ufeff" + [header.join(","), ...lines].join("\r\n");
     reply.header("content-type", "text/csv; charset=utf-8");
-    reply.header("content-disposition", `attachment; filename="convergence-opportunities-${new Date().toISOString().slice(0, 10)}.csv"`);
+    reply.header("content-disposition", `attachment; filename="negrisk-baskets-${new Date().toISOString().slice(0, 10)}.csv"`);
     return reply.send(csv);
-  });
-
-  /* ---------------- orders ---------------- */
-  app.post("/api/orders", async (req) => {
-    const a = requireTrader(req);
-    const body = parse(z.object({
-      accountId: accountEnum,
-      eventId: z.string().min(1).max(200),
-      qty: z.number().int().positive(),
-      source: z.enum(["manual", "auto"]).optional(),
-      ackFatEdge: z.boolean().optional()
-    }), req.body);
-    const order = await engine.createOrder(actorOf(a), body);
-    return { ok: true, order, state: stateFor(a, body.accountId) };
-  });
-
-  app.post("/api/orders/:id/hedge", async (req) => {
-    const a = requireTrader(req);
-    const { id } = parse(z.object({ id: z.string().min(1).max(80) }), req.params);
-    const body = parse(z.object({ accountId: accountEnum }), req.body);
-    const order = await engine.hedgeOrder(actorOf(a), body.accountId, id);
-    return { ok: true, order, state: stateFor(a, body.accountId) };
-  });
-
-  app.post("/api/orders/:id/flatten", async (req) => {
-    const a = requireTrader(req);
-    const { id } = parse(z.object({ id: z.string().min(1).max(80) }), req.params);
-    const body = parse(z.object({ accountId: accountEnum }), req.body);
-    await engine.flattenOrder(actorOf(a), body.accountId, id);
-    return { ok: true, state: stateFor(a, body.accountId) };
-  });
-
-  app.post("/api/orders/:id/archive", async (req) => {
-    const a = requireTrader(req);
-    const { id } = parse(z.object({ id: z.string().min(1).max(80) }), req.params);
-    const body = parse(z.object({ accountId: accountEnum }), req.body);
-    engine.archiveOrder(actorOf(a), body.accountId, id);
-    return { ok: true, state: stateFor(a, body.accountId) };
-  });
-
-  /* ---------------- positions ---------------- */
-  app.post("/api/positions", async (req) => {
-    const a = requireTrader(req);
-    const body = parse(z.object({
-      accountId: accountEnum,
-      eventId: z.string().min(1).max(200),
-      sizeUsd: z.number().positive().max(50_000_000)
-    }), req.body);
-    const position = engine.createCombo(actorOf(a), body.accountId, body);
-    return { ok: true, position, state: stateFor(a, body.accountId) };
-  });
-
-  app.post("/api/positions/align-all", async (req) => {
-    const a = requireTrader(req);
-    const body = parse(z.object({ accountId: accountEnum }), req.body);
-    const count = await engine.alignAll(actorOf(a), body.accountId);
-    return { ok: true, count, state: stateFor(a, body.accountId) };
-  });
-
-  app.post("/api/positions/:evId/align", async (req) => {
-    const a = requireTrader(req);
-    const { evId } = parse(z.object({ evId: z.string().min(1).max(200) }), req.params);
-    const body = parse(z.object({ accountId: accountEnum }), req.body);
-    await engine.alignHedge(actorOf(a), body.accountId, evId);
-    return { ok: true, state: stateFor(a, body.accountId) };
-  });
-
-  app.post("/api/flatten-all", async (req) => {
-    const a = requireTrader(req);
-    const body = parse(z.object({ accountId: accountEnum }), req.body);
-    const result = engine.flattenAll(actorOf(a), body.accountId);
-    return { ok: true, result, state: stateFor(a, body.accountId) };
-  });
-
-  /* ---------------- reviews ---------------- */
-  app.post("/api/reviews/:id/take", async (req) => {
-    const a = requireTrader(req);
-    const { id } = parse(z.object({ id: z.string().min(1).max(80) }), req.params);
-    const body = parse(z.object({ accountId: accountEnum, mode: z.enum(["shrink", "abort", "hold"]) }), req.body);
-    engine.takeReview(actorOf(a), body.accountId, id, body.mode);
-    return { ok: true, state: stateFor(a, body.accountId) };
-  });
-
-  app.post("/api/reviews/:id/ignore", async (req) => {
-    const a = requireTrader(req);
-    const { id } = parse(z.object({ id: z.string().min(1).max(80) }), req.params);
-    const body = parse(z.object({ accountId: accountEnum }), req.body);
-    engine.ignoreReview(actorOf(a), body.accountId, id);
-    return { ok: true, state: stateFor(a, body.accountId) };
-  });
-
-  app.post("/api/reviews/:id/flatten", async (req) => {
-    const a = requireTrader(req);
-    const { id } = parse(z.object({ id: z.string().min(1).max(80) }), req.params);
-    const body = parse(z.object({ accountId: accountEnum }), req.body);
-    await engine.flattenReview(actorOf(a), body.accountId, id);
-    return { ok: true, state: stateFor(a, body.accountId) };
   });
 
   /* ---------------- risk ---------------- */
@@ -671,23 +600,31 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
 
   app.get("/api/admin/events", async (req) => {
     requireAdmin(req);
-    return { events: market.events };
+    const neg = market.negRisk.map(o => ({
+      id: "negrisk:" + o.id, title: o.title, cat: "NegRisk", due: o.due, active: o.status === "ready",
+      source: "polymarket", kind: "negrisk", detail: `${o.n} 个结果 · ${o.profit.toFixed(3)} USDC/组`
+    }));
+    const mm = market.mmUniverse.map(m => ({
+      id: "mm:" + m.id, title: m.title, cat: m.category, due: m.due, active: true,
+      source: "polymarket", kind: "marketmaking", detail: `24h ${Math.round(m.volume24h).toLocaleString("en-US")} · 价差 ${((m.bestAsk - m.bestBid) * 100).toFixed(1)}¢`
+    }));
+    return { events: [...neg, ...mm] };
   });
 
   app.get("/api/admin/status", async (req) => {
     requireAdmin(req);
     return {
-      version: "2.2.0",
+      version: "3.0.0",
       uptime: Math.round(process.uptime()),
       pid: process.pid,
       node: process.version,
       memory: process.memoryUsage(),
       counts: {
         users: repo.userCount(),
-        events: market.events.length,
-        positions: repo.positionsAll().length,
-        orders: repo.ordersAll().length,
-        reviews: repo.reviewsAll().length,
+        events: market.negRisk.length + market.mmUniverse.length,
+        positions: repo.mmPositionsAll("marketmaking").filter(p => p.inventory !== 0).length,
+        orders: repo.conversionsAll("negrisk", 1000).length,
+        reviews: 0,
         audit: repo.auditAll({ limit: 1000 }).length
       },
       venues: [market.hlStatus, market.pmStatus],
@@ -714,12 +651,12 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   app.post("/api/admin/data/reset", async (req) => {
     const a = requireAdmin(req);
     parse(z.object({ confirm: z.literal("RESET") }), req.body);
-    if (engine.tradingMode() === "live" && repo.positionsAll().length > 0) {
-      throw new EngineError("live_reset_blocked", "实盘模式下不能直接重置账本，请先在交易所平掉全部头寸", 409);
+    if (engine.tradingMode() === "live" && engine.mmSnapshot("marketmaking").totals.inventoryUsd > 0) {
+      throw new EngineError("live_reset_blocked", "实盘模式下不能直接重置账本，请先在交易所平掉全部做市库存", 409);
     }
     resetLiveBaseline(repo);
     await engine.refreshCatalog(actorOf(a));
-    repo.auditAdd({ t: nowClock(), actor: a.user.name, actorId: a.user.id, action: "重置数据", obj: "五账户纸面账本", venue: "管理", detail: "已清空纸面交易，五个账户各重置为 10,000 USDC，并重新拉取实时 Polymarket 目录" });
+    repo.auditAdd({ t: nowClock(), actor: a.user.name, actorId: a.user.id, action: "重置数据", obj: "双策略纸面账本", venue: "管理", detail: "已清空纸面成交，NegRisk 与做市账户各重置为 10,000 USDC，并重新拉取实时 Polymarket 扫描面" });
     engine.emit("state");
     return { ok: true, state: stateFor(a, accountFrom(req)) };
   });

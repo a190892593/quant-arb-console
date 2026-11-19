@@ -1,43 +1,67 @@
-import type { Book, DerivedEvent, Limit, Rule, AccountId } from "./types.js";
+import type {
+  AccountId, Conversion, Limit, MmMarket, MmParams, MmPosition, NegRiskOpportunity, Rule
+} from "./types.js";
+
+/* ============================================================
+   Limits — one set per desk, usage computed from real exposure
+   ============================================================ */
 
 export const DEFAULT_LIMITS: Limit[] = [
-  { id: "pm", name: "单场所敞口 · Polymarket", desc: "按合约成本口径，含未结算头寸", value: 1_200_000, used: 0, kind: "usd" },
-  { id: "hl", name: "Hyperliquid 保证金占用", desc: "维持保证金 + 缓冲，按 4.8x 折算", value: 120_000, used: 0, kind: "usd" },
-  { id: "delta", name: "组合净 Delta", desc: "两腿差额的标的等值敞口", value: 250_000, used: 0, kind: "usd" },
-  { id: "settle", name: "7 日内结算敞口", desc: "临近结算事件的合约成本合计", value: 300_000, used: 0, kind: "usd" },
-  { id: "conc", name: "单事件集中度", desc: "最大单一事件成本占净值比例", value: 15, used: 0, kind: "pct" }
+  { id: "gross", name: "总敞口上限", desc: "按占用资金口径：转换=当日已转换成本，做市=全部库存市值", value: 8_000, used: 0, kind: "usd" },
+  { id: "market", name: "单标的上限", desc: "单个事件/市场的最大占用", value: 2_500, used: 0, kind: "usd" },
+  { id: "quote", name: "双边报价名义", desc: "做市台同时在场的双边报价名义合计；转换账户为 0", value: 1_600, used: 0, kind: "usd" },
+  { id: "daily", name: "当日亏损上限", desc: "当日已实现加未实现亏损的绝对金额", value: 300, used: 0, kind: "usd" },
+  { id: "conc", name: "单标占净值", desc: "最大单一事件/市场占账户净值的比例", value: 20, used: 0, kind: "pct" }
 ];
 
-export const RULE_DEFS: Rule[] = [
-  { id: "daily-loss", name: "日亏损降档", desc: "当日回撤达到阈值时停止开新仓，仅允许平仓与补对冲", on: true, value: 1.5, unit: "pct", min: 0.2, max: 20, step: 0.1, category: "账户护栏" },
-  { id: "latency", name: "报价延迟熔断", desc: "任一场所心跳超过阈值立即暂停开仓，保留已有对冲", on: true, value: 1500, unit: "ms", min: 100, max: 10_000, step: 50, category: "账户护栏" },
-  { id: "settle-freeze", name: "结算前冻结加仓", desc: "距结算小于阈值的事件只减不加；S2/S3 默认关闭，可在本账户打开", on: true, value: 2, unit: "days", min: 0, max: 14, step: 0.5, category: "账户护栏" },
-  { id: "fat-edge", name: "巨边人工复核", desc: "毛边超过阈值时不自动执行，需人工确认以排除陈旧报价", on: true, value: 800, unit: "bps", min: 100, max: 10_000, step: 50, category: "账户护栏" },
-  { id: "gap-fill", name: "对冲缺口自动补足", desc: "对冲缺口超过 max(本阈值, 目标对冲 × 比例阈值) 时自动补单", on: true, value: 500, unit: "usd", min: 0, max: 100_000, step: 100, category: "对冲规则" },
-  { id: "gap-fill-pct", name: "对冲缺口比例阈值", desc: "目标对冲名义的比例阈值，与固定金额阈值取较大值", on: true, value: 3, unit: "pct", min: 0, max: 50, step: 0.5, category: "对冲规则" },
-  { id: "max-delta", name: "单事件最大真实 Delta", desc: "事件真实 Delta 超过该倍数额度时拒绝建仓", on: true, value: 25, unit: "x", min: 1, max: 50, step: 1, category: "执行阈值" },
-  { id: "bounded-tail", name: "仅允许有界尾部", desc: "拒绝空头永续 + 二元 YES 这类结算亏损无上限的结构；关闭后才会允许方向性尾部", on: true, category: "尾部风险" },
-  { id: "min-qty", name: "最小合约腿数量", desc: "低于该股数的订单直接拒绝；这是硬约束", on: true, value: 100, unit: "shares", min: 100, max: 100_000, step: 100, category: "执行阈值", hard: true },
-  { id: "max-order-pct", name: "单笔最大净值占比", desc: "单笔订单合约成本不得超过账户当前净值的比例", on: true, value: 25, unit: "pct", min: 1, max: 100, step: 1, category: "执行阈值" },
-  { id: "manual-depth-pct", name: "人工下单盘口占比", desc: "人工执行默认使用的 Polymarket 盘口深度比例", on: true, value: 65, unit: "pct", min: 5, max: 100, step: 5, category: "执行阈值" },
-  { id: "auto-size-pct", name: "自动执行单笔净值占比", desc: "自动引擎单笔目标成本占账户净值的比例", on: true, value: 6, unit: "pct", min: 0.5, max: 25, step: 0.5, category: "自动执行" },
-  { id: "auto-max-notional", name: "自动单笔名义上限", desc: "自动引擎单笔合约成本上限，避免高净值时单笔过大", on: true, value: 40_000, unit: "usd", min: 100, max: 10_000_000, step: 100, category: "自动执行" },
-  { id: "depth-utilization-pct", name: "盘口深度使用上限", desc: "自动订单最多使用 Polymarket 盘口深度的比例", on: true, value: 40, unit: "pct", min: 5, max: 100, step: 5, category: "自动执行" },
-  { id: "auto-cooldown-sec", name: "自动执行冷却", desc: "同一账户两笔自动开仓之间的最小间隔", on: true, value: 60, unit: "sec", min: 10, max: 3600, step: 10, category: "自动执行" },
-  { id: "min-confidence", name: "最低置信度", desc: "信号置信度低于该分数时只观察，不进入可执行队列", on: true, value: 62, unit: "score", min: 0, max: 100, step: 1, category: "信号过滤" },
-  { id: "min-depth", name: "最低盘口深度", desc: "Polymarket 可成交深度低于该金额时只观察", on: true, value: 15_000, unit: "usd", min: 0, max: 1_000_000, step: 1000, category: "信号过滤" }
+export function scaledDefaultLimits(accountId: AccountId, equity: number): Limit[] {
+  const neg = accountId === "negrisk";
+  return DEFAULT_LIMITS.map(l => {
+    const pctOfEquity = (p: number) => Math.max(100, Math.round(equity * p / 100 / 10) * 10);
+    if (l.kind === "pct") return { ...l, value: neg ? 25 : 12 };
+    const value = l.id === "gross" ? pctOfEquity(neg ? 80 : 40)
+      : l.id === "market" ? pctOfEquity(neg ? 25 : 12)
+      : l.id === "quote" ? (neg ? 100 : pctOfEquity(50))
+      : pctOfEquity(3);
+    return { ...l, value };
+  });
+}
+
+/* ============================================================
+   Rules — guardrails and the knobs that drive each desk
+   ============================================================ */
+
+const COMMON_RULES: Rule[] = [
+  { id: "daily-loss", name: "日亏损降档", desc: "当日回撤达到阈值时停止新开仓/新报价，仅允许减仓", on: true, value: 1.5, unit: "pct", min: 0.2, max: 20, step: 0.1, category: "账户护栏" },
+  { id: "latency", name: "报价延迟熔断", desc: "Polymarket 心跳超过阈值时暂停新开仓与新报价", on: true, value: 1500, unit: "ms", min: 100, max: 10_000, step: 50, category: "账户护栏" },
+  { id: "min-profit", name: "最低锁定利润", desc: "NegRisk 每组的最低净利；做市台不使用", on: true, value: 0.01, unit: "usd", min: 0, max: 5, step: 0.01, category: "信号过滤" }
 ];
 
-export const DEFAULT_RULES: Rule[] = RULE_DEFS.map(r => ({ ...r }));
+const NEGRISK_RULES: Rule[] = [
+  { id: "min-depth", name: "单腿最低流动性", desc: "任一结果盘口流动性低于阈值时只观察不转换", on: true, value: 20_000, unit: "usd", min: 0, max: 1_000_000, step: 1000, category: "信号过滤" },
+  { id: "max-sets", name: "单次最大组数", desc: "一次转换最多买入的 NO 组数；硬约束", on: true, value: 500, unit: "shares", min: 10, max: 5_000, step: 10, category: "执行阈值", hard: true },
+  { id: "fee-buffer", name: "费用缓冲", desc: "按转换成本与卖出收入计提的综合费率", on: true, value: 20, unit: "bps", min: 0, max: 200, step: 5, category: "执行阈值" },
+  { id: "settle-freeze", name: "结算前冻结", desc: "距结算小于阈值的事件禁止新转换", on: true, value: 1, unit: "days", min: 0, max: 14, step: 0.5, category: "账户护栏" }
+];
 
-/** S2/S3 trade the final convergence window, so the settlement freeze is off by default. */
+const MM_RULES: Rule[] = [
+  { id: "target-edge", name: "目标价差", desc: "双边报价相对中价的目标半价差", on: true, value: 55, unit: "bps", min: 5, max: 500, step: 5, category: "做市参数" },
+  { id: "min-spread", name: "最低盘口价差", desc: "市场自身价差低于该值时停止报价", on: true, value: 120, unit: "bps", min: 10, max: 2_000, step: 10, category: "做市参数" },
+  { id: "quote-size", name: "单边报价名义", desc: "每个市场每条边的报价名义", on: true, value: 240, unit: "usd", min: 20, max: 20_000, step: 10, category: "做市参数" },
+  { id: "max-inventory", name: "单市场库存上限", desc: "单市场库存市值上限，触及后只报减仓方向", on: true, value: 1_200, unit: "usd", min: 100, max: 100_000, step: 100, category: "库存管理" },
+  { id: "max-markets", name: "同时报价市场数", desc: "做市台同时报价的市场数量上限", on: true, value: 8, unit: "count", min: 1, max: 30, step: 1, category: "做市参数" },
+  { id: "min-liquidity", name: "最低盘口流动性", desc: "低于该流动性的市场不进入做市池", on: true, value: 25_000, unit: "usd", min: 0, max: 1_000_000, step: 1000, category: "信号过滤" },
+  { id: "skew", name: "库存偏斜强度", desc: "库存偏离中线时报价平移的比例；0 为不偏斜", on: true, value: 85, unit: "pct", min: 0, max: 150, step: 5, category: "库存管理" },
+  { id: "adverse-stop", name: "逆向波动熔断", desc: "中价在 1 分钟内反向超过该幅度时暂停该市场报价", on: true, value: 300, unit: "bps", min: 50, max: 3_000, step: 10, category: "账户护栏" },
+  { id: "flatten-pct", name: "减仓线", desc: "库存达到上限的比例时只报减仓方向", on: true, value: 92, unit: "pct", min: 50, max: 100, step: 1, category: "库存管理" }
+];
+
+export function ruleDefsFor(accountId: AccountId): Rule[] {
+  return [...COMMON_RULES, ...(accountId === "negrisk" ? NEGRISK_RULES : MM_RULES)].map(r => ({ ...r }));
+}
+
 export function defaultRulesFor(accountId: AccountId): Rule[] {
-  return RULE_DEFS.map(r => ({
-    ...r,
-    on: r.id === "settle-freeze"
-      ? accountId !== "converge" && accountId !== "latency"
-      : r.on
-  }));
+  return ruleDefsFor(accountId);
 }
 
 export function ruleValue(rules: Rule[], id: string, fallback: number): number {
@@ -49,110 +73,126 @@ export function ruleEnabled(rules: Rule[], id: string): boolean {
   return rules.find(r => r.id === id)?.on === true;
 }
 
+export function mmParamsFromRules(rules: Rule[]): MmParams {
+  const value = (id: string, fallback: number) => ruleEnabled(rules, id) ? ruleValue(rules, id, fallback) : fallback;
+  return {
+    targetEdgeBps: value("target-edge", 55),
+    minSpreadBps: value("min-spread", 120),
+    quoteNotional: value("quote-size", 240),
+    maxInventoryUsd: value("max-inventory", 1_200),
+    maxMarkets: Math.max(1, Math.round(value("max-markets", 8))),
+    minLiquidity: value("min-liquidity", 25_000),
+    skewStrength: value("skew", 85) / 100,
+    adverseStopBps: value("adverse-stop", 300),
+    flattenPct: value("flatten-pct", 92),
+    feeBps: 0
+  };
+}
 
-export function limitUsage(book: Book, equity: number, limits: Limit[]): Limit[] {
-  return limits.map(l => {
+/* ============================================================
+   Usage
+   ============================================================ */
+
+export function negRiskLimitUsage(input: {
+  conversions: Conversion[]; equity: number; limits: Limit[];
+}): Limit[] {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const todays = input.conversions.filter(c => c.createdAt >= today.getTime());
+  const gross = todays.reduce((s, c) => s + c.cost, 0);
+  const maxOne = todays.reduce((m, c) => Math.max(m, c.cost), 0);
+  const pnl = todays.reduce((s, c) => s + c.profit, 0);
+  return input.limits.map(l => {
     let used = 0;
-    if (l.id === "pm") used = book.cost;
-    if (l.id === "hl") used = book.margin;
-    if (l.id === "delta") used = Math.abs(book.netDelta);
-    if (l.id === "settle") used = book.settle7;
-    if (l.id === "conc") used = equity > 0 ? book.maxCost / equity * 100 : 0;
+    if (l.id === "gross") used = gross;
+    if (l.id === "market") used = maxOne;
+    if (l.id === "quote") used = 0;
+    if (l.id === "daily") used = Math.max(0, -pnl);
+    if (l.id === "conc") used = input.equity > 0 ? maxOne / input.equity * 100 : 0;
     return { ...l, used };
   });
 }
 
-export interface OrderCheckInput {
-  event: DerivedEvent;
-  qty: number;
-  book: Book;
+export function mmLimitUsage(input: {
+  markets: MmMarket[]; positions: MmPosition[]; equity: number; limits: Limit[];
+}): Limit[] {
+  const byId = new Map(input.markets.map(m => [m.id, m]));
+  const exposure = input.positions.map(p => {
+    const m = byId.get(p.marketId);
+    return Math.abs(p.inventory) * (m?.mid ?? p.avg);
+  });
+  const gross = exposure.reduce((s, v) => s + v, 0);
+  const maxOne = exposure.reduce((m, v) => Math.max(m, v), 0);
+  const quote = input.markets.reduce((s, m) => s + (m.quoteBid > 0 ? m.quoteNotional : 0) + (m.quoteAsk > 0 ? m.quoteNotional : 0), 0);
+  const realized = input.positions.reduce((s, p) => s + p.realized, 0);
+  const unrealized = input.positions.reduce((s, p) => {
+    const m = byId.get(p.marketId);
+    return s + (m ? p.inventory * (m.mid - p.avg) : 0);
+  }, 0);
+  const dailyLoss = Math.max(0, -(realized + unrealized));
+  return input.limits.map(l => {
+    let used = 0;
+    if (l.id === "gross") used = gross;
+    if (l.id === "market") used = maxOne;
+    if (l.id === "quote") used = quote;
+    if (l.id === "daily") used = dailyLoss;
+    if (l.id === "conc") used = input.equity > 0 ? maxOne / input.equity * 100 : 0;
+    return { ...l, used };
+  });
+}
+
+/* ============================================================
+   Pre-trade check · NegRisk conversion
+   ============================================================ */
+
+export interface CheckFailure { code: string; message: string }
+
+export interface ConversionCheckInput {
+  opp: NegRiskOpportunity;
+  sets: number;
+  equity: number;
+  conversions: Conversion[];
   limits: Limit[];
   rules: Rule[];
-  equity: number;
   kill: boolean;
-  auto: boolean;
-  source: "manual" | "auto";
+  paperEnabled: boolean;
   dailyLossPct: number;
-  ackFatEdge?: boolean;
-  strategy?: AccountId;
 }
 
-export interface CheckFailure {
-  code: string;
-  message: string;
-  details?: Record<string, unknown>;
-}
-
-export interface CheckResult {
-  ok: boolean;
-  failures: CheckFailure[];
-  projected: {
-    pmCost: number;
-    hedgeUsd: number;
-    margin: number;
-    delta: number;
-    settle7: number;
-    concPct: number;
-  };
-}
-
-export function checkOrder(input: OrderCheckInput): CheckResult {
-  const { event: d, qty, book, limits, rules, equity, kill, source, dailyLossPct, ackFatEdge } = input;
-  const failures: CheckFailure[] = [];  const newCost = qty * d.ask;
-  const newSignedDelta = qty * d.delta;
-  const newHedge = Math.abs(newSignedDelta);
-  const newMargin = newHedge / 4.8;
-  const pmCost = book.cost + newCost;
-  const margin = book.margin + newMargin;
-  // A properly filled pair adds no residual delta; the execution window is tracked separately.
-  const delta = book.netDelta;
-  const settle7 = book.settle7 + (d.days <= 7 ? newCost : 0);
-  const concPct = equity > 0 ? Math.max(book.maxCost, newCost) / equity * 100 : 100;
-
-  const minQty = Math.max(1, ruleValue(rules, "min-qty", 100));
-  const maxDelta = ruleEnabled(rules, "max-delta") ? ruleValue(rules, "max-delta", 25) : Infinity;
-  if (kill) failures.push({ code: "kill_switch", message: "熔断已触发，新开仓与补对冲均已停止。" });
-  if (!(qty >= minQty)) failures.push({ code: "qty_invalid", message: `合约腿数量至少 ${minQty.toLocaleString("en-US")} 股。` });
-  if (Math.abs(d.delta) > maxDelta) {
-    failures.push({ code: "delta_too_large", message: `该事件真实 Delta 为 ${d.delta.toFixed(1)}x 面值，超过 ${maxDelta}x 上限，拒绝建仓。` });
+export function checkConversion(input: ConversionCheckInput): { ok: boolean; failures: CheckFailure[] } {
+  const { opp, sets, equity, limits, rules } = input;
+  const failures: CheckFailure[] = [];
+  if (!input.paperEnabled) failures.push({ code: "simulation_paused", message: "模拟交易已暂停，无法执行转换。" });
+  if (input.kill) failures.push({ code: "kill_switch", message: "该账户已熔断，转换已停止。" });
+  if (!Number.isInteger(sets) || sets < 1) failures.push({ code: "sets_invalid", message: "转换组数必须是正整数。" });
+  const maxSets = Math.round(ruleValue(rules, "max-sets", 500));
+  if (sets > maxSets) failures.push({ code: "sets_limit", message: `单次最多转换 ${maxSets.toLocaleString("en-US")} 组。` });
+  if (sets > opp.maxSets) failures.push({ code: "depth", message: `按盘口流动性最多 ${opp.maxSets} 组。` });
+  const cost = opp.basketCost * sets;
+  const profit = opp.profit * sets;
+  const minProfit = ruleValue(rules, "min-profit", 0.01);
+  if (profit < minProfit * sets) failures.push({ code: "profit_too_small", message: `每组锁定利润低于 ${minProfit} USDC。` });
+  if (ruleEnabled(rules, "min-depth") && opp.outcomes.some(o => o.liquidity < ruleValue(rules, "min-depth", 20_000))) {
+    failures.push({ code: "liquidity", message: "至少一个结果的盘口流动性低于该账户阈值。" });
   }
-  if (qty > 0 && newCost > d.depth) {
-    failures.push({ code: "depth_exceeded", message: `计划 ${fmtUsd(newCost)} 超过盘口可成交 ${fmtUsd(d.depth)}。` });
+  const settleDays = ruleEnabled(rules, "settle-freeze") ? ruleValue(rules, "settle-freeze", 1) : 0;
+  const days = (Date.parse(opp.due) - Date.now()) / 86_400_000;
+  if (Number.isFinite(days) && days < settleDays) failures.push({ code: "settle_freeze", message: `距结算不足 ${settleDays} 天，禁止新转换。` });
+  if (ruleEnabled(rules, "daily-loss") && input.dailyLossPct <= -ruleValue(rules, "daily-loss", 1.5)) {
+    failures.push({ code: "daily_loss", message: `当日回撤 ${input.dailyLossPct.toFixed(2)}%，已触发日亏损降档。` });
   }
-  if (d.net <= 0 && source === "auto") {
-    failures.push({ code: "negative_edge", message: "净边为负，自动执行已拒绝。" });
-  }
-
-  const rule = (id: string) => ruleEnabled(rules, id);
-  if (rule("settle-freeze") && d.days < ruleValue(rules, "settle-freeze", 2)) {
-    failures.push({ code: "settle_freeze", message: `结算前 ${ruleValue(rules, "settle-freeze", 2)} 天冻结加仓，只允许减仓。` });
-  }
-  if (rule("bounded-tail") && d.delta > 0) {
-    failures.push({
-      code: "unbounded_tail",
-      message: "该结构使用空头永续对冲看涨二元合约，标的上涨时亏损无上限；低风险模式只允许有界尾部。"
-    });
-  }
-  if (rule("fat-edge") && d.grossBps > ruleValue(rules, "fat-edge", 800) && source === "auto" && !ackFatEdge) {
-    failures.push({ code: "fat_edge", message: `毛边超过 ${ruleValue(rules, "fat-edge", 800)}bps，需人工复核后才可执行。` });
-  }
-  if (rule("daily-loss") && dailyLossPct <= -ruleValue(rules, "daily-loss", 1.5)) {
-    failures.push({ code: "daily_loss", message: `当日回撤 ${dailyLossPct.toFixed(2)}%，已触发日亏损降档（阈值 ${ruleValue(rules, "daily-loss", 1.5)}%）。` });
-  }
-
+  if (cost > equity) failures.push({ code: "capital", message: `篮子成本 ${fmtUsd(cost)} 超过账户净值 ${fmtUsd(equity)}。` });
   const limit = (id: string) => limits.find(l => l.id === id);
-  const pm = limit("pm"), hl = limit("hl"), dl = limit("delta"), st = limit("settle"), cc = limit("conc");
-  if (pm && pmCost > pm.value) failures.push({ code: "limit_pm", message: `Polymarket 敞口将达 ${fmtUsd(pmCost)}，超过限额 ${fmtUsd(pm.value)}。` });
-  if (hl && margin > hl.value) failures.push({ code: "limit_hl", message: `Hyperliquid 保证金将达 ${fmtUsd(margin)}，超过限额 ${fmtUsd(hl.value)}。` });
-  if (dl && Math.abs(delta) > dl.value) failures.push({ code: "limit_delta", message: `净 Delta 将达 ${fmtUsd(Math.abs(delta))}，超过限额 ${fmtUsd(dl.value)}。` });
-  if (st && settle7 > st.value) failures.push({ code: "limit_settle", message: `7 日内结算敞口将达 ${fmtUsd(settle7)}，超过限额 ${fmtUsd(st.value)}。` });
-  if (cc && concPct > cc.value) failures.push({ code: "limit_conc", message: `单事件集中度将达 ${concPct.toFixed(1)}%，超过限额 ${cc.value}%。` });
-
-  return {
-    ok: failures.length === 0,
-    failures,
-    projected: { pmCost, hedgeUsd: newHedge, margin, delta, settle7, concPct }
-  };
+  const gross = negRiskLimitUsage({ conversions: input.conversions, equity, limits }).find(l => l.id === "gross");
+  if (limit("gross") && gross && gross.used + cost > limit("gross")!.value) {
+    failures.push({ code: "limit_gross", message: `当日转换成本将达 ${fmtUsd(gross.used + cost)}，超过限额 ${fmtUsd(limit("gross")!.value)}。` });
+  }
+  const market = limit("market");
+  if (market && cost > market.value) failures.push({ code: "limit_market", message: `单事件成本 ${fmtUsd(cost)} 超过单标的上限 ${fmtUsd(market.value)}。` });
+  const conc = limit("conc");
+  if (conc && equity > 0 && cost / equity * 100 > conc.value) {
+    failures.push({ code: "limit_conc", message: `单事件占净值 ${(cost / equity * 100).toFixed(1)}%，超过 ${conc.value}%。` });
+  }
+  return { ok: failures.length === 0, failures };
 }
 
 export function validateLimitValue(limit: Limit, used: number, value: number): CheckFailure | null {

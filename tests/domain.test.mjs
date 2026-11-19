@@ -1,65 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { derive, book, digitalFair, touchFair, hedgeDelta, DEFAULT_COST } from "../dist/domain/pricing.js";
+import { digitalFair, touchFair, hedgeDelta } from "../dist/domain/pricing.js";
+import { microprice, computeQuote, applyFill, matchTrades, DEFAULT_MM_PARAMS } from "../dist/domain/mm.js";
 
 const day = 86_400_000;
-const now = Date.parse("2026-11-19T00:00:00Z");
-
-function event(overrides = {}) {
-  return {
-    id: "e1", title: "BTC ≥ $100,000", cat: "BTC 价格", und: "BTC",
-    due: new Date(now + 30 * day).toISOString(), ask: 0.4, bid: 0.39, fair: 0.46,
-    depth: 100_000, conf: 90, delta: 0.2, src: "test", source: "demo",
-    ...overrides
-  };
-}
-
-test("derive: positive edge survives the two-leg cost model", () => {
-  const d = derive(event(), { now, market: { BTC: { px: 64_000, chg: 0 } }, cost: DEFAULT_COST });
-  assert.ok(d.grossBps > d.costBps);
-  assert.ok(d.net > 2.5);
-  assert.equal(d.status, "ready");
-  assert.equal(d.hedgeUsd, (100_000 / 0.4) * 0.2);
-  assert.ok(d.annualized > 0);
-});
-
-test("derive: negative gross is clamped to a watch state", () => {
-  const d = derive(event({ fair: 0.3 }), { now, market: { BTC: { px: 64_000, chg: 0 } } });
-  assert.ok(d.net < 0);
-  assert.equal(d.status, "watch");
-});
-
-test("derive: fat edge asks for manual review", () => {
-  const d = derive(event({ ask: 0.5, bid: 0.49, fair: 0.62 }), { now, market: { BTC: { px: 64_000, chg: 0 } } });
-  assert.ok(d.grossBps > 800);
-  assert.equal(d.status, "review");
-});
-
-test("derive: held event is marked active", () => {
-  const d = derive(event(), { now, heldIds: new Set(["e1"]) });
-  assert.equal(d.status, "active");
-});
-
-test("book: aggregates cost, target and pnl from the same ledger", () => {
-  const ctx = {
-    now,
-    market: { BTC: { px: 64_000, chg: 0 }, ETH: { px: 1_800, chg: 0 } },
-    events: [
-      event(),
-      event({ id: "e2", und: "ETH", ask: 0.2, bid: 0.19, fair: 0.24, delta: -0.1 })
-    ],
-    positions: [
-      { evId: "e1", qty: 100_000, avg: 0.38, hedgeUsd: 20_000, hedgeEntry: 66_000, hedgeSide: "short" },
-      { evId: "e2", qty: 50_000, avg: 0.18, hedgeUsd: 5_000, hedgeEntry: 1_700, hedgeSide: "long" }
-    ]
-  };
-  const b = book(ctx);
-  assert.equal(b.rows.length, 2);
-  assert.ok(b.cost > 0);
-  assert.ok(b.pnl > 0);
-  assert.ok(Math.abs(b.netDelta) < 1, String(b.netDelta));
-  assert.ok(b.byUnd.BTC.face > 0 && b.byUnd.ETH.face > 0);
-});
+void day;
 
 test("digitalFair: ATM digital is near 50% and reverses for the other side", () => {
   const up = digitalFair({ spot: 100, strike: 100, vol: 0.6, days: 30, direction: 1 });
@@ -76,10 +21,55 @@ test("touchFair prices a reach market above the terminal digital price", () => {
   assert.ok(touch > 0.25 && touch < 0.45, String(touch));
 });
 
-test("hedgeDelta returns the true perp/face multiplier and its sign", () => {
+test("hedgeDelta returns a positive up-delta and mirrors it for the down side", () => {
   const up = hedgeDelta({ spot: 100, strike: 105, vol: 0.6, days: 30, direction: 1 });
   const down = hedgeDelta({ spot: 100, strike: 105, vol: 0.6, days: 30, direction: -1 });
   assert.ok(up > 0 && down < 0);
   assert.ok(up > 0.5 && up <= 10, String(up));
   assert.ok(Math.abs(up + down) < 1e-9);
+});
+
+const top = { bestBid: 0.48, bestAsk: 0.5, bidSize: 900, askSize: 100 };
+
+test("microprice leans toward the thicker side", () => {
+  const mid = microprice(top);
+  assert.ok(mid > 0.49 && mid < 0.5, String(mid));
+});
+
+test("market-making quote stays inside the book and earns the target edge", () => {
+  const q = computeQuote({ top, inventory: 0, params: DEFAULT_MM_PARAMS, paused: false });
+  assert.equal(q.status, "quoting");
+  assert.ok(q.bid > top.bestBid && q.ask < top.bestAsk + 0.001, `${q.bid}/${q.ask}`);
+  assert.ok(q.ask > q.bid);
+  assert.ok(q.size > 0);
+});
+
+test("inventory skew shifts both quotes against the position", () => {
+  const flat = computeQuote({ top, inventory: 0, params: DEFAULT_MM_PARAMS, paused: false });
+  const long = computeQuote({ top, inventory: 2_000, params: DEFAULT_MM_PARAMS, paused: false });
+  assert.ok(long.skewBps < 0);
+  assert.ok(long.bid < flat.bid && long.ask < flat.ask);
+  assert.ok(long.status === "inventory" || long.bid === 0 || long.bid < flat.bid);
+});
+
+test("two-sided fills realize spread on a round trip", () => {
+  const pos = { marketId: "m", title: "t", inventory: 0, avg: 0, realized: 0, fees: 0, fills: 0, paused: false, lastFillAt: null, updatedAt: 0 };
+  const bought = applyFill(pos, "buy", 0.48, 100, 0, 1);
+  assert.equal(bought.inventory, 100);
+  assert.ok(Math.abs(bought.avg - 0.48) < 1e-9);
+  const sold = applyFill(bought, "sell", 0.5, 100, 0, 2);
+  assert.equal(sold.inventory, 0);
+  assert.ok(Math.abs(sold.realized - 2) < 1e-6, String(sold.realized));
+});
+
+test("a trade must print through the resting quote to fill it", () => {
+  const quote = { bid: 0.48, ask: 0.5, size: 100, quoteAt: 1_000 };
+  const fills = matchTrades(quote, [
+    { conditionId: "c", side: "SELL", price: 0.49, size: 50, ts: 1_100 },
+    { conditionId: "c", side: "SELL", price: 0.48, size: 30, ts: 1_200 },
+    { conditionId: "c", side: "BUY", price: 0.5, size: 40, ts: 900 }
+  ]);
+  assert.equal(fills.length, 1);
+  assert.equal(fills[0].side, "buy");
+  assert.equal(fills[0].size, 30);
 });

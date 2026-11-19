@@ -1,13 +1,11 @@
 import { config, type MarketDataMode } from "../config.js";
 import type { Repository } from "../db/repository.js";
-import { digitalFair, hedgeDelta, touchDelta, clamp, touchFair } from "../domain/pricing.js";
-import type { EventContract, Market, MarketTick, VenueStatus } from "../domain/types.js";
-import { DAY_MS } from "../util.js";
-import { generateDemoCatalog } from "./demo-catalog.js";
+import type { Market, MarketTick, NegRiskOpportunity, VenueStatus } from "../domain/types.js";
+import type { PmBookTop, PmMmMarket, PmTrade } from "../venues/polymarket.js";
+import { demoBooks, demoMmUniverse, demoNegRisk, demoTrades } from "./demo-desks.js";
 import * as hl from "../venues/hyperliquid.js";
 import * as pm from "../venues/polymarket.js";
 import { logger } from "../logger.js";
-import { getSettings } from "../settings.js";
 
 const FALLBACK_MARKET: Market = {
   BTC: { px: 64_115, chg: 0.82 },
@@ -16,32 +14,35 @@ const FALLBACK_MARKET: Market = {
   HYPE: { px: 68.55, chg: -0.36 }
 };
 
-const DEFAULT_VOLS: Record<string, number> = {
-  BTC: 0.55, ETH: 0.65, SOL: 0.85, HYPE: 0.95, XRP: 0.8, DOGE: 0.9, BNB: 0.7, AVAX: 0.85, LINK: 0.8
-};
-
 const TRACKED = ["BTC", "ETH", "SOL", "HYPE", "XRP", "DOGE", "BNB", "AVAX", "LINK"];
 
+/**
+ * Venue service for the two desks:
+ *  - Hyperliquid supplies the macro price strip only; it is not traded.
+ *  - Polymarket supplies the NegRisk basket scan, the high-liquidity market
+ *    universe, live top-of-book for quoted YES tokens, and the taker tape.
+ */
 export class MarketService {
   market: Market = structuredClone(FALLBACK_MARKET);
-  events: EventContract[] = [];
-  vols: Record<string, number> = { ...DEFAULT_VOLS };
+  negRisk: NegRiskOpportunity[] = [];
+  negRiskAt = 0;
+  mmUniverse: PmMmMarket[] = [];
+  mmBooks: Record<string, PmBookTop> = {};
+  mmUniverseAt = 0;
+  mmBooksAt = 0;
   hlStatus: VenueStatus;
   pmStatus: VenueStatus;
   catalogMode: "live" | "demo" | "offline" = "offline";
-  scanSeq = 48_219;
+  scanSeq = 0;
   lastScanAt = Date.now();
-  lastCatalogAt = 0;
   lastHlAt = 0;
   lastFullHlAt = 0;
   private hlFailures = 0;
   private hlCooldownUntil = 0;
-  private nextCatalogAt = 0;
-  private refreshing = false;
 
   constructor(private readonly repo: Repository) {
     this.hlStatus = {
-      id: "hyperliquid", label: "Hyperliquid 永续", state: "degraded", latencyMs: null,
+      id: "hyperliquid", label: "Hyperliquid 行情", state: "degraded", latencyMs: null,
       message: "尚未连接", lastOkAt: null, mode: "live"
     };
     this.pmStatus = {
@@ -54,43 +55,28 @@ export class MarketService {
 
   async init(): Promise<void> {
     await this.refreshHyperliquid();
-    await this.refreshVols();
-
-    if (config.seedTestFixture || this.mode === "demo") {
-      await this.buildCatalog(true);
-    } else {
-      this.events = this.repo.eventsAll(true).filter(e => e.source === "polymarket");
-      if (this.events.length) {
-        this.catalogMode = "live";
-        this.lastCatalogAt = Date.now();
-      }
-      await this.tryLiveCatalog();
-    }
-
-    this.updateModelSpots();
-    this.recomputeFair();
+    await this.refreshDesks(true);
     this.lastScanAt = Date.now();
+    void this.repo;
   }
 
-  async refreshHyperliquid(light = false): Promise<void> {
+  async refreshHyperliquid(): Promise<void> {
     if (!config.hl.enabled) {
-      this.hlStatus = {
-        ...this.hlStatus, state: "disabled", message: "HL_ENABLED=false", latencyMs: null
-      };
+      this.hlStatus = { ...this.hlStatus, state: "disabled", message: "HL_ENABLED=false", latencyMs: null };
       return;
     }
     if (Date.now() < this.hlCooldownUntil) return;
     const fullDue = !this.lastFullHlAt || Date.now() - this.lastFullHlAt > 8_000;
     try {
-      if (!light || fullDue) {
+      if (fullDue) {
         const snap = await hl.fetchSnapshot();
         for (const [coin, tick] of Object.entries(snap.market)) {
-          if (TRACKED.includes(coin) || this.events.some(e => e.und === coin)) this.market[coin] = tick;
+          if (TRACKED.includes(coin)) this.market[coin] = tick;
         }
         this.lastFullHlAt = Date.now();
         this.lastHlAt = Date.now();
         this.hlStatus = {
-          id: "hyperliquid", label: "Hyperliquid 永续", state: "ok",
+          id: "hyperliquid", label: "Hyperliquid 行情", state: "ok",
           latencyMs: snap.latencyMs, message: config.hl.testnet ? "测试网连接正常" : "主网连接正常",
           lastOkAt: Date.now(), mode: "live"
         };
@@ -103,10 +89,7 @@ export class MarketService {
           if (current.prevDayPx && current.prevDayPx > 0) current.chg = (px / current.prevDayPx - 1) * 100;
         }
         this.lastHlAt = Date.now();
-        this.hlStatus = {
-          ...this.hlStatus, state: "ok", latencyMs,
-          message: config.hl.testnet ? "测试网连接正常" : "主网连接正常", lastOkAt: Date.now()
-        };
+        this.hlStatus = { ...this.hlStatus, state: "ok", latencyMs, lastOkAt: Date.now() };
       }
       this.hlFailures = 0;
       this.hlCooldownUntil = 0;
@@ -115,231 +98,130 @@ export class MarketService {
       const backoff = Math.min(60_000, 5_000 * 2 ** Math.min(4, this.hlFailures));
       this.hlCooldownUntil = Date.now() + backoff;
       logger.warn({ err: (err as Error).message, backoff }, "Hyperliquid snapshot failed");
-      this.hlStatus = {
-        ...this.hlStatus, state: "down", latencyMs: null,
-        message: `行情不可达：${(err as Error).message}`
+      this.hlStatus = { ...this.hlStatus, state: "down", latencyMs: null, message: `行情不可达：${(err as Error).message}` };
+    }
+  }
+
+  /**
+   * NegRisk is rescanned every 90s; the market-making pool every 5 minutes.
+   * Demo/test mode rebuilds both deterministically and never claims live data.
+   */
+  async refreshDesks(force = false): Promise<void> {
+    const demo = config.seedTestFixture || this.mode === "demo" || !config.pm.enabled;
+    const now = Date.now();
+    if (demo) {
+      this.negRisk = demoNegRisk(now);
+      this.negRiskAt = now;
+      this.mmUniverse = demoMmUniverse(now);
+      this.mmUniverseAt = now;
+      this.mmBooks = demoBooks(this.mmUniverse, now);
+      this.mmBooksAt = now;
+      this.catalogMode = "demo";
+      this.pmStatus = {
+        id: "polymarket", label: "Polymarket CLOB",
+        state: config.pm.enabled ? "degraded" : "disabled", latencyMs: null,
+        message: "示例盘口：仅用于测试夹具 / 演示模式，不代表真实盘口",
+        lastOkAt: null, mode: "demo"
+      };
+      return;
+    }
+    if (!force && now - this.negRiskAt < 90_000 && now - this.mmUniverseAt < 5 * 60_000) return;
+    try {
+      if (force || now - this.negRiskAt >= 90_000) {
+        this.negRisk = await pm.fetchNegRiskOpportunities();
+        this.negRiskAt = now;
+      }
+      if (force || now - this.mmUniverseAt >= 5 * 60_000) {
+        this.mmUniverse = await pm.fetchMmUniverse(60);
+        this.mmUniverseAt = now;
+      }
+      this.catalogMode = this.mmUniverse.length || this.negRisk.length ? "live" : "offline";
+      this.pmStatus = {
+        ...this.pmStatus, state: "ok", lastOkAt: now, mode: "live",
+        message: `NegRisk ${this.negRisk.length} 个事件 · 做市池 ${this.mmUniverse.length} 个市场`
+      };
+      logger.info({ negRisk: this.negRisk.length, ready: this.negRisk.filter(o => o.status === "ready").length, mm: this.mmUniverse.length }, "desk universe refreshed");
+    } catch (err) {
+      logger.warn({ err: (err as Error).message }, "desk universe refresh failed");
+      this.pmStatus = {
+        ...this.pmStatus, state: "degraded",
+        message: `Polymarket 目录不可达：${(err as Error).message}${this.mmUniverse.length ? " · 沿用最近快照" : ""}`
       };
     }
   }
 
-  async refreshVols(): Promise<void> {
-    if (!config.hl.enabled) return;
-    const coins = Object.keys(DEFAULT_VOLS);
-    const settled = await Promise.allSettled(coins.map(c => hl.realisedVol(c, DEFAULT_VOLS[c] ?? 0.7)));
-    settled.forEach((r, i) => {
-      const coin = coins[i]!;
-      if (r.status === "fulfilled") this.vols[coin] = r.value;
-    });
-  }
-
-  private updateModelSpots(): void {
-    for (const ev of this.events) {
-      if (!ev.model) continue;
-      const spot = this.market[ev.und]?.px;
-      if (spot) ev.model.spot = spot;
-      ev.model.vol = this.vols[ev.und] ?? ev.model.vol;
+  async refreshMmBooks(tokenIds: string[]): Promise<Record<string, PmBookTop>> {
+    if (!tokenIds.length) return {};
+    const demo = config.seedTestFixture || this.mode === "demo" || !config.pm.enabled;
+    if (demo) {
+      this.mmBooks = demoBooks(this.mmUniverse, Date.now());
+      this.mmBooksAt = Date.now();
+      return this.mmBooks;
+    }
+    try {
+      const fresh = await pm.fetchMmBooks(tokenIds);
+      this.mmBooks = { ...this.mmBooks, ...fresh };
+      this.mmBooksAt = Date.now();
+      return fresh;
+    } catch (err) {
+      logger.warn({ err: (err as Error).message }, "CLOB books refresh failed");
+      return {};
     }
   }
 
-  recomputeFair(): void {
-    const now = Date.now();
-    for (const ev of this.events) {
-      if (ev.model) {
-        const days = Math.max(0.25, (Date.parse(ev.due) - now) / DAY_MS);
-        const fair = ev.model.kind === "touch"
-          ? touchFair({
-              spot: ev.model.spot ?? this.market[ev.und]?.px ?? 0,
-              strike: ev.model.strike,
-              vol: ev.model.vol,
-              days
-            })
-          : digitalFair({
-              spot: ev.model.spot ?? this.market[ev.und]?.px ?? 0,
-              strike: ev.model.strike,
-              vol: ev.model.vol,
-              days,
-              direction: ev.model.direction
-            });
-        if (fair != null) ev.fair = +fair.toFixed(4);
-        ev.delta = ev.model.kind === "touch"
-          ? touchDelta({
-              spot: ev.model.spot ?? this.market[ev.und]?.px ?? 0,
-              strike: ev.model.strike,
-              vol: ev.model.vol,
-              days
-            })
-          : hedgeDelta({
-              spot: ev.model.spot ?? this.market[ev.und]?.px ?? 0,
-              strike: ev.model.strike,
-              vol: ev.model.vol,
-              days,
-              direction: ev.model.direction
-            });
-      }
+  async recentMmTrades(sinceMs: number): Promise<PmTrade[]> {
+    const demo = config.seedTestFixture || this.mode === "demo" || !config.pm.enabled;
+    if (demo) {
+      return demoTrades(this.mmUniverse, this.mmBooks, Date.now()).filter(t => t.ts >= sinceMs);
+    }
+    try {
+      const all = await pm.fetchMmTrades(500);
+      return all.filter(t => t.ts > sinceMs);
+    } catch (err) {
+      logger.warn({ err: (err as Error).message }, "trade tape unavailable");
+      return [];
     }
   }
 
-  /** Mean-reverting quote jitter for demo books; real PM books are left untouched. */
-  private jitterDemoQuotes(): void {
-    const now = Date.now();
-    for (const ev of this.events) {
-      if (ev.source !== "demo") continue;
-      const age = now - (ev.quoteAt ?? now);
-      // Only part of the book refreshes each tick, so a handful of quotes genuinely go stale.
-      // Anything older than 11s is forced to refresh, keeping the demo bounded.
-      if (age < 11_000 && Math.random() < 0.55) {
-        ev.quoteAgeMs = age;
-        continue;
-      }
-      const baseAsk = ev.baseAsk ?? ev.ask;
-      const baseBid = ev.baseBid ?? ev.bid;
-      const baseFair = ev.baseFair ?? ev.fair;
-      const spread = Math.max(0.002, baseAsk - baseBid);
-      const baseGross = baseFair - (baseAsk + baseBid) / 2;
-      const desiredAsk = clamp(ev.fair - baseGross + spread / 2, 0.021, 0.96);
-      const noise = (Math.random() - 0.5) * 0.0016;
-      ev.ask = clamp(ev.ask + (desiredAsk - ev.ask) * 0.16 + noise, 0.02, 0.96);
-      ev.bid = clamp(ev.ask - spread, 0.01, ev.ask - 0.002);
-      ev.quoteAt = now;
-      ev.quoteRefPx = this.market[ev.und]?.px;
-      ev.quoteAgeMs = 0;
-    }
+  async refreshNegRisk(force = false): Promise<void> {
+    await this.refreshDesks(force);
   }
 
   async tick(): Promise<void> {
     await this.refreshHyperliquid();
-    this.updateModelSpots();
-    this.recomputeFair();
-    const now = Date.now();
-    for (const ev of this.events) {
-      // Live PM quotes are a polling snapshot; we do not claim per-tick staleness for them.
-      ev.quoteAgeMs = ev.source === "demo" ? Math.max(0, now - (ev.quoteAt ?? now)) : 0;
-    }
-    if (config.seedTestFixture) this.jitterDemoQuotes();
+    await this.refreshDesks(false);
     this.scanSeq += 1;
     this.lastScanAt = Date.now();
-
-    const shouldRefresh = !config.seedTestFixture
-      && config.pm.enabled
-      && Date.now() > this.nextCatalogAt
-      && !this.refreshing;
-    if (shouldRefresh) void this.tryLiveCatalog();
   }
 
-  private async buildCatalog(force: boolean): Promise<void> {
-    const generated = generateDemoCatalog({
-      market: this.market,
-      vols: this.vols,
-      size: 140
-    });
-    const held = new Set(this.repo.positionsAll().map(p => p.evId));
-    const incoming = new Set(generated.map(e => e.id));
-    const preserved = this.events.filter(e => held.has(e.id) && !incoming.has(e.id)).map(e => ({ ...e, stale: true }));
-    this.events = [...generated, ...preserved];
-    for (const ev of this.events) {
-      ev.quoteAt = ev.quoteAt ?? Date.now();
-      ev.quoteRefPx = ev.quoteRefPx ?? this.market[ev.und]?.px;
-    }
-    this.catalogMode = "demo";
-    this.pmStatus = {
-      id: "polymarket", label: "Polymarket CLOB", state: config.pm.enabled ? "degraded" : "disabled",
-      latencyMs: null,
-      message: config.pm.enabled
-        ? (this.mode === "demo" ? "MARKET_DATA_MODE=demo，使用示例盘口（HL 行情为实时）" : "Polymarket 不可达，使用示例盘口（HL 行情为实时）")
-        : "PM_ENABLED=false，使用示例盘口",
-      lastOkAt: null, mode: "demo"
+  async refreshCatalog(force = false): Promise<{ mode: string; events: number; message: string }> {
+    await this.refreshDesks(force);
+    return {
+      mode: this.catalogMode,
+      events: this.negRisk.length + this.mmUniverse.length,
+      message: this.pmStatus.message
     };
-    this.repo.eventsReplace(this.events, true);
-    this.lastCatalogAt = Date.now();
-    if (force) logger.warn({ events: this.events.length }, "using demo Polymarket catalog");
-  }
-
-  private async tryLiveCatalog(): Promise<boolean> {
-    if (this.refreshing) return false;
-    this.refreshing = true;
-    try {
-      const catalog = await pm.fetchCatalog(this.market, this.vols);
-      if (catalog.events.length < 1) throw new Error("Polymarket 没有可用的真实价格盘口");
-      const held = new Set(this.repo.positionsAll().map(p => p.evId));
-      const incoming = new Set(catalog.events.map(e => e.id));
-      const preserved = this.events.filter(e => held.has(e.id) && !incoming.has(e.id)).map(e => ({ ...e, stale: true }));
-      const merged = [...catalog.events, ...preserved];
-      const now = Date.now();
-      for (const ev of merged) {
-        // A fresh PM catalog snapshot: quote age starts at zero for every live event.
-        ev.quoteAt = now;
-        ev.quoteRefPx = this.market[ev.und]?.px;
-        ev.quoteAgeMs = 0;
-      }
-      this.events = merged;
-      this.catalogMode = "live";
-      this.repo.eventsReplace(merged, true);
-      this.pmStatus = {
-        id: "polymarket", label: "Polymarket CLOB", state: "ok",
-        latencyMs: null,
-        message: `已接入 ${catalog.events.length} 个真实市场（扫描 ${catalog.scanned}，解析 ${catalog.parsed}）`,
-        lastOkAt: Date.now(), mode: "live"
-      };
-      this.lastCatalogAt = Date.now();
-      this.nextCatalogAt = Date.now() + 10 * 60_000;
-      logger.info({ events: catalog.events.length, scanned: catalog.scanned, parsed: catalog.parsed }, "Polymarket live catalog loaded");
-      return true;
-    } catch (err) {
-      logger.warn({ err: (err as Error).message }, "Polymarket catalog unavailable");
-      const freshEnough = this.events.length > 0 && this.lastCatalogAt > 0 && Date.now() - this.lastCatalogAt < 10 * 60_000;
-      if (config.seedTestFixture) {
-        await this.buildCatalog(true);
-      } else if (!freshEnough) {
-        const held = new Set(this.repo.positionsAll().map(p => p.evId));
-        this.events = this.events.filter(e => held.has(e.id));
-        this.catalogMode = "offline";
-        this.repo.eventsReplace(this.events, true);
-      }
-      this.pmStatus = {
-        id: "polymarket", label: "Polymarket CLOB",
-        state: config.pm.enabled ? "degraded" : "disabled",
-        latencyMs: null,
-        message: `实时目录不可用：${(err as Error).message}${freshEnough ? " · 暂用 10 分钟内的最后快照" : ""}`,
-        lastOkAt: this.pmStatus.lastOkAt,
-        mode: freshEnough ? "live" : this.catalogMode === "demo" ? "demo" : "offline"
-      };
-      this.lastCatalogAt = Date.now();
-      this.nextCatalogAt = Date.now() + 5 * 60_000;
-      return false;
-    } finally {
-      this.refreshing = false;
-    }
-  }
-
-  async refreshCatalog(force = false): Promise<{ mode: "live" | "demo" | "offline"; events: number; message: string }> {
-    if (config.seedTestFixture) {
-      await this.buildCatalog(force);
-      return { mode: "demo", events: this.events.length, message: "测试夹具：已重建示例目录" };
-    }
-    await this.tryLiveCatalog();
-    return { mode: this.catalogMode, events: this.events.length, message: this.pmStatus.message };
   }
 
   persist(): void {
-    this.repo.eventsReplace(this.events, true);
+    void this.repo;
   }
 
   snapshot() {
     return {
       market: this.market,
-      events: this.events,
-      vols: this.vols,
+      negRisk: this.negRisk,
+      mmUniverse: this.mmUniverse,
+      mmBooks: this.mmBooks,
       catalogMode: this.catalogMode,
       scanSeq: this.scanSeq,
       lastScanAt: this.lastScanAt,
-      venues: [this.hlStatus, this.pmStatus],
-      universe: this.events.length
+      venues: [this.hlStatus, this.pmStatus]
     };
   }
 
-  setMarketForTest(market: Market, vols: Record<string, number> = {}): void {
+  setMarketForTest(market: Market): void {
     this.market = { ...this.market, ...market };
-    this.vols = { ...this.vols, ...vols };
   }
 
   static fallbackMarket(): Market { return structuredClone(FALLBACK_MARKET); }
