@@ -281,7 +281,7 @@ export class MarketService {
         lastOkAt: Date.now(), mode: "live"
       };
       this.lastCatalogAt = Date.now();
-      this.nextCatalogAt = Date.now() + 3 * 60_000;
+      this.nextCatalogAt = Date.now() + 10 * 60_000;
       logger.info({ events: catalog.events.length, scanned: catalog.scanned, parsed: catalog.parsed }, "Polymarket live catalog loaded");
       return true;
     } catch (err) {
@@ -290,9 +290,10 @@ export class MarketService {
       if (config.seedTestFixture) {
         await this.buildCatalog(true);
       } else if (!freshEnough) {
-        this.events = [];
+        const held = new Set(this.repo.positionsAll().map(p => p.evId));
+        this.events = this.events.filter(e => held.has(e.id));
         this.catalogMode = "offline";
-        this.repo.eventsReplace([], true);
+        this.repo.eventsReplace(this.events, true);
       }
       this.pmStatus = {
         id: "polymarket", label: "Polymarket CLOB",
@@ -303,7 +304,7 @@ export class MarketService {
         mode: freshEnough ? "live" : this.catalogMode === "demo" ? "demo" : "offline"
       };
       this.lastCatalogAt = Date.now();
-      this.nextCatalogAt = Date.now() + 60_000;
+      this.nextCatalogAt = Date.now() + 5 * 60_000;
       return false;
     } finally {
       this.refreshing = false;

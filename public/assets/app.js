@@ -700,7 +700,7 @@ import { CONV as D, api, download } from "./store.js";
         "<div><span>信号</span><b>" + a.signals + "</b><small>可执行 " + a.ready + "</small></div>" +
         "<div><span>净值占比</span><b>" + pct(a.equity / Math.max(1, (app.portfolio && app.portfolio.equity) || 1)) + "</b></div>" +
       "</div>" +
-      '<p class="acct-desc">' + esc(a.desc) + "</p>" +
+      '<p class="acct-desc">' + esc(a.desc + (a.requiresRealtime && a.signals === 0 ? " 当前为 3 分钟轮询，暂无实时报价年龄信号。" : "")) + "</p>" +
       '<div class="acct-actions">' +
         '<button class="btn btn-sm ' + (a.id === app.accountId ? "btn-primary" : "btn-ghost") + '" data-acct-enter="' + a.id + '">' + (a.id === app.accountId ? "当前账户" : "进入账户") + "</button>" +
         '<button class="btn btn-sm btn-ghost" data-acct-auto="' + a.id + '">' + (a.auto ? "暂停执行" : "恢复执行") + "</button>" +
@@ -844,8 +844,9 @@ import { CONV as D, api, download } from "./store.js";
     $("#today-line").textContent = "OVERVIEW · " + (currentAcct() ? acctCode(app.accountId) + " " + currentAcct().name + " · " : "") + dateStr() + " " + weekday();
     $("#hero-equity").textContent = usd(D.equityNow, 2);
     $("#rail-equity").textContent = usd(D.equityNow, 2);
-    $("#hero-30d").textContent = series.length > 1 ? signedPct(r30, 2) : "—";
-    $("#hero-12m").textContent = series.length > 1 ? signedPct(r12, 1) : "—";
+    const spanDays = series.length > 1 ? (Date.now() - series[0].t) / 86_400_000 : 0;
+    $("#hero-30d").textContent = spanDays >= 30 ? signedPct(r30, 2) : "—";
+    $("#hero-12m").textContent = spanDays >= 365 ? signedPct(r12, 1) : "—";
     $("#hero-30d").className = r30 >= 0 ? "pos" : "neg";
     $("#hero-12m").className = r12 >= 0 ? "pos" : "neg";
     const dayStart = new Date();
@@ -889,7 +890,7 @@ import { CONV as D, api, download } from "./store.js";
       $("#attr-total-bar").style.width = Math.abs(totalPnl) / attrMax * 100 + "%";
       $("#attr-total-bar").className = totalPnl >= 0 ? "pos" : "neg";
     }
-    $("#kpi-dd").innerHTML = "−" + Math.abs(dd90 * 100).toFixed(1) + '<i class="unit">%</i>';
+    $("#kpi-dd").innerHTML = series.length > 1 ? "−" + Math.abs(dd90 * 100).toFixed(2) + '<i class="unit">%</i>' : "—";
     const realized = D.account.realizedPnl ?? 0;
     $("#kpi-realized").textContent = signedUsd(realized, 0);
     $("#kpi-realized").className = "kpi-v num " + (realized >= 0 ? "pos" : "neg");

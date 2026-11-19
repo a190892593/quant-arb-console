@@ -104,6 +104,7 @@ export class Engine {
       });
       for (const account of this.accounts()) {
         if (!account.enabled) continue;
+        this.settleExpiring(account.id);
         this.sampleEquity(account.id);
         void this.maybeAutoExecute(account.id);
       }
@@ -170,6 +171,7 @@ export class Engine {
     const account = this.account(accountId);
     const def = accountDef(accountId);
     if (!account.auto || account.kill || !account.enabled) return;
+    if (!config.seedTestFixture && config.marketDataMode !== "demo" && this.market.pmStatus.state !== "ok") return;
     const last = this.lastAutoAt.get(accountId) ?? 0;
     if (Date.now() - last < 60_000) return;
     const positions = this.repo.positionsAll(accountId);
@@ -402,6 +404,9 @@ export class Engine {
     if (!isAccountId(input.accountId)) throw new EngineError("account_invalid", "账户不存在", 404);
     const account = this.account(input.accountId);
     if (!account.enabled) throw new EngineError("account_disabled", "该账户已被管理员停用", 409);
+    if (!config.seedTestFixture && config.marketDataMode !== "demo" && this.market.pmStatus.state !== "ok") {
+      throw new EngineError("pm_offline", "Polymarket 实时目录未连接，暂停新开仓；已有头寸仍可平仓", 409);
+    }
     const source = input.source ?? "manual";
     const d = this.derived(input.accountId).find(r => r.id === input.eventId);
     if (!d) throw new EngineError("event_not_found", "事件不存在、已下架，或不属于该账户的策略范围", 404);
@@ -723,6 +728,25 @@ export class Engine {
     this.touch();
   }
 
+  /** Paper settlement: once the PM market reaches its end date, close at the last real bid. */
+  private settleExpiring(accountId: AccountId): void {
+    const now = Date.now();
+    for (const p of this.repo.positionsAll(accountId)) {
+      const d = this.market.events.find(e => e.id === p.evId);
+      if (!d) continue;
+      const due = Date.parse(d.due);
+      if (!Number.isFinite(due) || due > now) continue;
+      try {
+        this.closePositionPart({ id: "system", name: "到期结算", role: "admin" }, accountId, p.evId);
+        this.feed(accountId, { kind: "ok", title: "到期结算", detail: d.title, val: "已按最后买价平仓" });
+      } catch (err) {
+        this.riskEvent(accountId, {
+          level: "warn", title: "到期平仓失败", detail: (err as Error).message, val: p.evId
+        });
+      }
+    }
+  }
+
   async alignHedge(user: Actor, accountId: AccountId, evId: string): Promise<void> {
     const account = this.account(accountId);
     if (account.kill) throw new EngineError("kill_switch", "该账户已熔断，请先解除熔断", 409);
@@ -1033,7 +1057,7 @@ export class Engine {
     const points = this.repo.equityAll(accountId);
     const last = points[points.length - 1];
     const now = Date.now();
-    if (!force && last && now - last.t < 5 * 60_000 && Math.abs(last.v - current) < 0.01) return;
+    if (!force && last && now - last.t < 5 * 60_000) return;
     this.repo.equityAppend(accountId, { t: now, v: +current.toFixed(2) });
     this.repo.equityTrim(accountId, 5000);
   }

@@ -2,7 +2,7 @@ import { config } from "../config.js";
 import { digitalFair, hedgeDelta, touchDelta, clamp, touchFair } from "../domain/pricing.js";
 import type { EventContract, Market, VenueStatus } from "../domain/types.js";
 
-const TIMEOUT = 9_000;
+const TIMEOUT = 15_000;
 
 interface GammaMarket {
   id?: string;
@@ -134,13 +134,20 @@ function parseJsonArray(text: string | undefined): string[] {
  * keep quotes that Gamma actually reports (both bid and ask), so nothing is synthesised.
  */
 export async function fetchCatalog(market: Market, vols: Record<string, number>): Promise<PmCatalog> {
-  const PAGE = 100;
+  const PAGE = 50;
   const MAX_PAGES = 5;
   const list: GammaMarket[] = [];
   for (let page = 0; page < MAX_PAGES; page++) {
     const url = `${config.pm.gammaUrl}/events?tag_slug=crypto&active=true&closed=false&limit=${PAGE}&offset=${page * PAGE}&order=volume24hr&ascending=false`;
-    const raw = await getJson<GammaEvent[] | { data?: GammaEvent[] }>(url);
-    const batch = Array.isArray(raw) ? raw : (raw.data ?? []);
+    let batch: GammaEvent[];
+    try {
+      const raw = await getJson<GammaEvent[] | { data?: GammaEvent[] }>(url);
+      batch = Array.isArray(raw) ? raw : (raw.data ?? []);
+    } catch (err) {
+      // A later page may be throttled; the earlier real pages are still a valid catalog.
+      if (list.length) break;
+      throw err;
+    }
     for (const ev of batch) {
       for (const m of ev.markets ?? []) list.push(m);
     }
@@ -211,7 +218,7 @@ export async function fetchCatalog(market: Market, vols: Record<string, number>)
         liquidity: depth
       }
     });
-    if (events.length >= 120) break;
+    if (events.length >= 240) break;
   }
 
   events.sort((a, b) => b.depth - a.depth);
