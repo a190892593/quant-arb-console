@@ -28,7 +28,7 @@ export const ACCOUNT_DEFS: readonly AccountDef[] = [
     holdLabel: "2–60 天",
     paperFillMs: 4200,
     maxOpen: 3,
-    defaultEquity: 620_000,
+    defaultEquity: 10_000,
     defaultMinEdge: 2.5
   },
   {
@@ -40,7 +40,7 @@ export const ACCOUNT_DEFS: readonly AccountDef[] = [
     holdLabel: "< 72 小时",
     paperFillMs: 2200,
     maxOpen: 2,
-    defaultEquity: 300_000,
+    defaultEquity: 10_000,
     defaultMinEdge: 1.2
   },
   {
@@ -52,7 +52,7 @@ export const ACCOUNT_DEFS: readonly AccountDef[] = [
     holdLabel: "秒–分钟",
     paperFillMs: 600,
     maxOpen: 2,
-    defaultEquity: 140_000,
+    defaultEquity: 10_000,
     defaultMinEdge: 1.5,
     requiresRealtime: true
   },
@@ -65,7 +65,7 @@ export const ACCOUNT_DEFS: readonly AccountDef[] = [
     holdLabel: "60–365 天",
     paperFillMs: 5200,
     maxOpen: 2,
-    defaultEquity: 224_930.22,
+    defaultEquity: 10_000,
     defaultMinEdge: 3.0
   }
 ];
@@ -90,7 +90,10 @@ export function defaultAccountSettings(): AccountSettings[] {
     killReason: "",
     minEdge: def.defaultMinEdge,
     paperFillMs: def.paperFillMs,
-    lastKillAt: null
+    lastKillAt: null,
+    realizedPnl: 0,
+    closedTrades: 0,
+    wins: 0
   }));
 }
 
@@ -108,7 +111,10 @@ export function mergeAccountSettings(stored?: Array<Partial<AccountSettings>> | 
       killReason: typeof s?.killReason === "string" ? s.killReason : "",
       minEdge: Number.isFinite(s?.minEdge) && (s!.minEdge as number) >= 0 ? (s!.minEdge as number) : def.defaultMinEdge,
       paperFillMs: Number.isFinite(s?.paperFillMs) && (s!.paperFillMs as number) >= 200 ? (s!.paperFillMs as number) : def.paperFillMs,
-      lastKillAt: Number.isFinite(s?.lastKillAt) ? (s!.lastKillAt as number) : null
+      lastKillAt: Number.isFinite(s?.lastKillAt) ? (s!.lastKillAt as number) : null,
+      realizedPnl: Number.isFinite(s?.realizedPnl) ? (s!.realizedPnl as number) : 0,
+      closedTrades: Number.isFinite(s?.closedTrades) ? Math.max(0, Math.round(s!.closedTrades as number)) : 0,
+      wins: Number.isFinite(s?.wins) ? Math.max(0, Math.round(s!.wins as number)) : 0
     };
   });
 }

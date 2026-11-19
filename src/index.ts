@@ -2,17 +2,18 @@ import { config } from "./config.js";
 import { Repository } from "./db/repository.js";
 import { MarketService } from "./market/service.js";
 import { Engine } from "./engine/engine.js";
-import { ensureDefaults, seedTradingData } from "./seed/index.js";
+import { ensureDefaults, resetLiveBaseline, seedTradingData } from "./seed/index.js";
 import { buildServer } from "./server/app.js";
 import { logger } from "./logger.js";
 
 async function main(): Promise<void> {
   const repo = new Repository(config.dbPath);
   ensureDefaults(repo);
+  if (!config.seedTestFixture && repo.metaGet("liveBaselineV2") !== "1") resetLiveBaseline(repo);
 
   const market = new MarketService(repo);
   await market.init();
-  seedTradingData(repo, market);
+  if (config.seedTestFixture) seedTradingData(repo, market);
   if (!repo.metaGet("engineStartedAt")) repo.metaSet("engineStartedAt", Date.now());
 
   const engine = new Engine(repo, market);
