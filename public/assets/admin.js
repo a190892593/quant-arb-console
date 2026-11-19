@@ -102,13 +102,19 @@ function renderAll() {
 }
 
 function renderHeader() {
-  $("#admin-name").textContent = S.me.name;
-  $("#admin-email").textContent = S.me.email;
-  $("#admin-avatar").textContent = (S.me.name || "A").slice(0, 1).toUpperCase();
+  const name = $("#admin-name");
+  if (name) name.textContent = S.me.name;
+  const email = $("#admin-email");
+  if (email) email.textContent = S.me.email;
+  const avatar = $("#admin-avatar");
+  if (avatar) avatar.textContent = (S.me.name || "A").slice(0, 1).toUpperCase();
   const pill = $("#env-pill");
-  const mode = S.status?.catalogMode === "live" ? "实时目录" : "示例目录";
-  pill.innerHTML = '<span class="dot ' + (S.status?.catalogMode === "live" ? "ok" : "warn") + '"></span>' + mode + " · " + (S.status?.tradingMode === "live" ? "实盘" : "纸面");
-  $("#admin-title").textContent = titles[S.view] || "概览";
+  if (pill) {
+    const mode = S.status?.catalogMode === "live" ? "实时目录" : "示例目录";
+    pill.innerHTML = '<span class="dot ' + (S.status?.catalogMode === "live" ? "ok" : "warn") + '"></span>' + mode + " · " + (S.status?.tradingMode === "live" ? "实盘" : "纸面");
+  }
+  const title = $("#admin-title");
+  if (title) title.textContent = "管理 · " + (titles[S.view] || "概览");
 }
 
 function renderOverview() {
@@ -121,7 +127,7 @@ function renderOverview() {
   const kpis = [
     { label: "引擎", value: live ? "LIVE" : "DEMO", sub: "目录 " + st.catalogMode + " · " + (st.tradingMode === "live" ? "实盘执行" : "纸面撮合"), cls: live ? "is-ok" : "is-warn" },
     { label: "扫描面", value: String(st.counts.events), sub: "扫描序号 #" + Number(st.scanSeq || 0).toLocaleString("en-US"), cls: "" },
-    { label: "独立账户", value: String(S.accounts.length), sub: "个账户 · " + running + " 运行 · " + (S.accounts.length - running) + " 熔断或停用", cls: running === S.accounts.length ? "is-ok" : "is-warn" },
+    { label: "独立账户", value: String(S.accounts.length), sub: running + " 运行 · " + (S.accounts.length - running) + " 熔断或停用", cls: running === S.accounts.length ? "is-ok" : "is-warn" },
     { label: "场所", value: venuesOk ? "OK" : "DEGRADED", sub: st.venues.map(v => v.label.split(" ")[0] + " " + v.state).join(" · "), cls: venuesOk ? "is-ok" : "is-warn" }
   ];
   $("#overview-kpis").innerHTML = kpis.map(k =>
@@ -364,15 +370,18 @@ function renderData() {
 }
 
 /* ---------------- navigation ---------------- */
-function setView(view) {
+function setView(view, syncHash = true) {
+  if (!titles[view]) view = "overview";
   S.view = view;
-  $$(".admin-nav-item").forEach(b => b.classList.toggle("is-on", b.dataset.view === view));
+  $$(".admin-nav-item").forEach(b => b.classList.toggle("is-on", b.dataset.adminTab === view));
   $$("[data-admin-view]").forEach(sec => { sec.hidden = sec.dataset.adminView !== view; });
-  $("#admin-title").textContent = titles[view] || "概览";
+  const title = $("#admin-title");
+  if (title) title.textContent = "管理 · " + (titles[view] || "概览");
+  if (syncHash) history.replaceState(null, "", "#/admin/" + view);
   if (view === "audit") renderAudit();
 }
 
-$$(".admin-nav-item").forEach(b => b.addEventListener("click", () => setView(b.dataset.view)));
+$$(".admin-nav-item").forEach(b => b.addEventListener("click", () => setView(b.dataset.adminTab)));
 $$("[data-goto]").forEach(a => a.addEventListener("click", e => { e.preventDefault(); setView(a.dataset.goto); }));
 
 /* ---------------- modal ---------------- */
@@ -409,7 +418,7 @@ document.addEventListener("keydown", e => { if (e.key === "Escape") closeModal()
 
 /* ---------------- actions ---------------- */
 $("#refresh-all").addEventListener("click", () => loadAll(true));
-$("#admin-logout").addEventListener("click", async () => {
+$("#admin-logout")?.addEventListener("click", async () => {
   try { await api("POST", "/api/auth/logout"); } catch { /* ignore */ }
   location.href = "/login";
 });
@@ -511,7 +520,7 @@ async function handleAccountAction(e) {
   if (enter || (row && !e.target.closest("button"))) {
     const accountId = enter ? enter.dataset.accountEnter : row.dataset.accountRow;
     localStorage.setItem("conv.account", accountId);
-    location.href = "/";
+    document.dispatchEvent(new CustomEvent("conv:open-account", { detail: { id: accountId } }));
     return;
   }
   const id = (edit || auto || enabled || kill)?.dataset[edit ? "accountEdit" : auto ? "accountAuto" : enabled ? "accountEnabled" : "accountKill"];
@@ -740,7 +749,8 @@ $("#reset-data").addEventListener("click", () => {
 
 /* ---------------- clock + boot ---------------- */
 function tickClock() {
-  $("#admin-clock").textContent = new Date().toLocaleTimeString("zh-CN", { timeZone: "Asia/Taipei", hour12: false });
+  const el = $("#admin-clock");
+  if (el) el.textContent = new Date().toLocaleTimeString("zh-CN", { timeZone: "Asia/Taipei", hour12: false });
 }
 
 async function boot() {
@@ -748,14 +758,20 @@ async function boot() {
   setInterval(tickClock, 1000);
   try {
     const me = await api("GET", "/api/auth/me");
-    if (!me.user) { location.href = "/login?next=/admin"; return; }
-    if (me.user.role !== "admin") { location.href = "/"; return; }
+    if (!me.user || me.user.role !== "admin") return;
     S.me = me.user;
     S.csrf = me.csrf || "";
     await loadAll();
+    const m = (location.hash.match(/^#\/admin\/([a-z]+)/) || [])[1];
+    setView(titles[m] ? m : "overview", false);
   } catch (err) {
-    toast("初始化失败：" + err.message, "bad");
+    toast("管理数据加载失败：" + err.message, "bad");
   }
 }
 
+window.__adminShow = view => {
+  if (!S.me) return;
+  setView(titles[view] ? view : "overview", false);
+};
+window.__adminRefresh = () => { if (S.me) void loadAll(true); };
 void boot();

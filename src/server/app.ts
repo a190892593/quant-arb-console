@@ -1,4 +1,4 @@
-﻿import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import fastifyCookie from "@fastify/cookie";
 import fastifyStatic from "@fastify/static";
 import rateLimit from "@fastify/rate-limit";
@@ -139,7 +139,11 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
         }
       });
     }
-    const anyErr = err as Error & { statusCode?: number; code?: string; issues?: unknown };
+    const anyErr = err as Error & { statusCode?: number; code?: string; issues?: unknown; error?: { code?: string } };
+    // @fastify/rate-limit surfaces the built body, not a statusCode; keep it a real 429.
+    if (anyErr.error?.code === "rate_limited") {
+      return reply.code(429).send({ error: { code: "rate_limited", message: "请求过于频繁，请稍后再试" } });
+    }
     if (anyErr.statusCode && anyErr.statusCode < 500) {
       return reply.code(anyErr.statusCode).send({
         error: { code: anyErr.code ?? "bad_request", message: anyErr.message, issues: anyErr.issues }
@@ -192,15 +196,11 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
   });
   app.get("/admin", async (req, reply) => {
     const a = sessionFromToken(repo, req.cookies[COOKIE]);
-    if (!a) return reply.redirect("/login?next=/admin");
-    if (!roleAtLeast(a.user, "admin")) {
-      return reply.code(403).type("text/html; charset=utf-8").send(
-        "<!doctype html><meta charset=utf-8><title>403</title><body style=\"background:#0b0e13;color:#dfe7ef;font:14px system-ui;padding:48px\">" +
-        "<h1>403 · 需要管理员权限</h1><p>当前账户是 " + a.user.role + "，无权进入管理后台。</p><a style=\"color:#5ee0e8\" href=\"/\">返回交易终端</a></body>"
-      );
-    }
-    return sendHtml(reply, html("admin.html"));
+    if (!a) return reply.redirect("/login?next=" + encodeURIComponent("/#/admin"));
+    if (!roleAtLeast(a.user, "admin")) return reply.redirect("/");
+    return reply.redirect("/#/admin");
   });
+  app.get("/admin.html", async (_req, reply) => reply.redirect("/#/admin"));
   app.get("/index.html", async (_req, reply) => reply.redirect("/"));
   app.get("/event-arb-console.html", async (_req, reply) => reply.redirect("/"));
   app.get("/favicon.ico", async (_req, reply) => reply.code(204).send());

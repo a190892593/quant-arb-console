@@ -1,64 +1,7 @@
-/* CONVERGENCE · admin console
-   Deliberately a different product surface from the trading terminal:
-   light slate + administrative blue, not graphite + signal cyan. */
-.admin-body {
-  --ink-1000: #eef1f6;
-  --ink-950: #f7f9fc;
-  --ink-900: #ffffff;
-  --ink-875: #fbfcfe;
-  --ink-850: #f2f5f9;
-  --ink-800: #e8edf4;
-  --ink-750: #dbe3ef;
-  --line-soft: rgba(23, 42, 72, .09);
-  --line: rgba(23, 42, 72, .14);
-  --line-strong: rgba(23, 42, 72, .24);
-  --txt-hi: #14213a;
-  --txt: #2a3a55;
-  --txt-mid: #52627c;
-  --txt-dim: #64748b;
-  --accent: #2f5fd0;
-  --accent-soft: rgba(47, 95, 208, .10);
-  --accent-line: rgba(47, 95, 208, .30);
-  --accent-ink: #ffffff;
-  --pos: #0f7a53;
-  --pos-soft: rgba(15, 122, 83, .10);
-  --neg: #b42318;
-  --neg-soft: rgba(180, 35, 24, .09);
-  --warn: #9a5b00;
-  --warn-soft: rgba(154, 91, 0, .10);
-  overflow: hidden;
-  background: var(--ink-1000);
-  color: var(--txt);
-}
-.admin-body ::-webkit-scrollbar-thumb { background: rgba(23, 42, 72, .18); border-radius: 99px; }
-.admin-body .admin-rail { background: var(--ink-950); border-right: 1px solid var(--line); }
-.admin-body .admin-top { background: #ffffff; }
-.admin-body .admin-card,
-.admin-body .admin-kpi,
-.admin-body .admin-account-card,
-.admin-body .admin-btn { box-shadow: 0 1px 2px rgba(20, 33, 58, .04); }
-.admin-body .admin-brand { color: var(--accent); }
-.admin-body .admin-nav-item.is-on { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent); }
-.admin-body .admin-nav-item.is-on span { color: var(--accent); }
-.admin-body .admin-top h1::before {
-  content: ""; display: inline-block; width: 5px; height: 17px; border-radius: 2px;
-  background: var(--accent); margin-right: 9px; vertical-align: -2px;
-}
-.admin-body .admin-btn-primary { color: #ffffff; font-weight: 600; }
-.admin-body .admin-btn-danger {
-  background: #fff; border-color: rgba(180, 35, 24, .32); color: var(--neg);
-}
-.admin-body .admin-btn-danger:hover { background: var(--neg-soft); border-color: rgba(180, 35, 24, .5); color: var(--neg); }
-.admin-body .admin-tag.ok { border-color: rgba(15, 122, 83, .26); }
-.admin-body .admin-tag.warn { border-color: rgba(154, 91, 0, .26); }
-.admin-body .admin-tag.bad { border-color: rgba(180, 35, 24, .26); }
-.admin-body .admin-modal-scrim { background: rgba(19, 28, 45, .38); }
-.admin-body .admin-modal { box-shadow: 0 24px 70px rgba(19, 28, 45, .22); }
-.admin-body .admin-toast { background: #fff; box-shadow: 0 12px 30px rgba(19, 28, 45, .16); }
-.admin-body .admin-danger-card { border-color: rgba(180, 35, 24, .26); }
-.admin-body .admin-account-card.is-current { box-shadow: inset 0 0 0 1px var(--accent-line), 0 1px 2px rgba(20, 33, 58, .04); }
-.admin-body .admin-kpi b { font-family: var(--font-display); font-weight: 600; }
-.admin-body .admin-account-eq { font-family: var(--font-display); font-weight: 600; }
+/* CONVERGENCE · management workspace
+   Embedded in the terminal shell. It deliberately inherits the dark token set,
+   typography and button language so configuration and trading read as one product.
+   The workspace shell (tabs + content stack) lives at the bottom of this file. */
 .admin { display: flex; height: 100vh; }
 .admin-rail {
   width: 264px;
@@ -323,4 +266,37 @@
 .admin-account-meta b{font-family:var(--font-mono);font-size:12px;color:var(--txt)}
 .admin-account-actions{display:flex;flex-wrap:wrap;gap:6px;border-top:1px solid var(--line-soft);padding-top:11px;margin-top:11px}
 @media (max-width:900px){.admin-account-grid{grid-template-columns:1fr}}
+
+/* ============================ embedded management workspace ============================ */
+#view-admin { display: flex; flex-direction: column; gap: 16px; }
+#view-admin .page-head { padding-bottom: 0; }
+.admin-tabs {
+  display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none;
+  padding: 4px; background: var(--ink-950);
+  border: 1px solid var(--line-soft); border-radius: 8px;
+}
+.admin-tabs::-webkit-scrollbar { display: none; }
+.admin-tabs .admin-nav-item {
+  flex: none; width: auto; height: 32px; padding: 0 12px;
+  border: 1px solid transparent; border-radius: 6px;
+  background: transparent; color: var(--txt-mid); font-size: 12px; white-space: nowrap;
+}
+.admin-tabs .admin-nav-item:hover { background: var(--ink-900); color: var(--txt-hi); }
+.admin-tabs .admin-nav-item.is-on { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent); }
+.admin-tabs .admin-nav-item span { display: none; }
+.admin-stack { display: flex; flex-direction: column; gap: 18px; }
+#view-admin .admin-view { max-width: none; margin: 0; }
+.admin-toasts { bottom: 82px; }
+
+@media (max-width: 700px) {
+  #view-admin { gap: 12px; }
+  #view-admin .page-actions { width: 100%; flex-wrap: nowrap; justify-content: space-between; }
+  #view-admin .page-actions .admin-pill { display: none; }
+  #view-admin .page-actions .admin-clock { flex: 1; text-align: left; }
+  #view-admin .page-actions .btn { flex: none; width: auto; }
+  .admin-tabs { padding: 3px; }
+  .admin-tabs .admin-nav-item { height: 30px; padding: 0 9px; font-size: 11px; }
+  .admin-stack { gap: 14px; }
+  .admin-toasts { bottom: 86px; }
+}
 

@@ -292,17 +292,18 @@ try {
   await shot("live-overview.png");
   check("浏览器控制台无异常", errors.exceptions.length === 0 && errors.console.length === 0, JSON.stringify(errors));
 
-  // Admin console
-  await goto(base + "/admin", 1200);
-  check("管理后台加载", (await evaluate("document.title")).includes("管理后台") && (await evaluate(`document.querySelectorAll('.admin-nav-item').length`)) === 9);
+  // Admin workspace, embedded in the terminal shell
+  await goto(base + "/admin", 2600);
+  check("管理后台加载", (await evaluate("document.title")).includes("管理") && (await evaluate(`document.querySelectorAll('#admin-tabs [data-admin-tab]').length`)) === 9);
   const adminData = await evaluate(`({
     kpis: document.querySelectorAll('#overview-kpis .admin-kpi').length,
     venues: document.querySelectorAll('#overview-venues .admin-venue').length,
     audit: document.querySelectorAll('#overview-audit tr').length,
-    users: document.querySelectorAll('#users-table tbody tr').length
+    users: document.querySelectorAll('#users-table tbody tr').length,
+    inShell: !!document.querySelector('#view-admin') && !document.querySelector('#view-admin').hidden
   })`);
-  check("后台概览与账号列表", adminData.kpis === 4 && adminData.venues === 2 && adminData.users >= 3, JSON.stringify(adminData));
-  await evaluate(`document.querySelector('[data-view="accounts"]').click()`);
+  check("后台概览与账号列表", adminData.kpis === 4 && adminData.venues === 2 && adminData.users >= 3 && adminData.inShell, JSON.stringify(adminData));
+  await evaluate(`document.querySelector('#admin-tabs [data-admin-tab="accounts"]').click()`);
   await sleep(300);
   const adminAccounts = await evaluate(`({
     cards: document.querySelectorAll('#accounts-grid .admin-account-card').length,
@@ -311,13 +312,13 @@ try {
   })`);
   check("后台策略账户矩阵", adminAccounts.cards === 4 && adminAccounts.rows === 4 && adminAccounts.kpis === 4, JSON.stringify(adminAccounts));
   await shot("live-admin-accounts.png");
-  await evaluate(`document.querySelector('[data-view="users"]').click()`);
+  await evaluate(`document.querySelector('#admin-tabs [data-admin-tab="users"]').click()`);
   await sleep(250);
   check("后台用户页", (await evaluate(`document.querySelectorAll('#users-table tbody tr').length`)) >= 3);
-  await evaluate(`document.querySelector('[data-view="strategy"]').click()`);
+  await evaluate(`document.querySelector('#admin-tabs [data-admin-tab="strategy"]').click()`);
   await sleep(250);
   check("后台策略表单", (await evaluate(`document.querySelectorAll('#settings-fields input').length`)) >= 6);
-  await evaluate(`document.querySelector('[data-view="risk"]').click()`);
+  await evaluate(`document.querySelector('#admin-tabs [data-admin-tab="risk"]').click()`);
   await sleep(250);
   await evaluate(`(() => { const el = document.querySelector('#risk-account'); el.value = 'converge'; el.dispatchEvent(new Event('change', { bubbles: true })); })()`);
   await sleep(600);
@@ -328,7 +329,7 @@ try {
     rules: document.querySelectorAll('#rules-list .admin-rule').length
   })`);
   check("后台风控按账户切换", riskAccount.selector === "converge" && riskAccount.synced === "converge" && riskAccount.limits === 5 && riskAccount.rules === 5, JSON.stringify(riskAccount));
-  await evaluate(`document.querySelector('[data-view="venues"]').click()`);
+  await evaluate(`document.querySelector('#admin-tabs [data-admin-tab="venues"]').click()`);
   await sleep(250);
   check("后台场所页", (await evaluate(`document.querySelectorAll('#venue-cards .admin-card').length`)) === 2);
   await shot("live-admin.png");

@@ -612,7 +612,7 @@ import { CONV as D, api, download } from "./store.js";
     const email = $("#user-email");
     if (email) email.textContent = u.email;
     const isAdmin = u.role === "admin";
-    [$("#admin-link"), $("#admin-btn")].forEach(el => { if (el) el.hidden = !isAdmin; });
+    [$("#nav-admin"), $("#admin-link"), $("#admin-btn")].forEach(el => { if (el) el.hidden = !isAdmin; });
     const humanChip = $('#audit-chips [data-actor="林 · 自营"]');
     if (humanChip) { humanChip.dataset.actor = u.name; humanChip.textContent = "人工操作"; }
   }
@@ -1672,8 +1672,8 @@ import { CONV as D, api, download } from "./store.js";
   }
 
   /* ---------------- routing ---------------- */
-  const routes = ["overview", "accounts", "scanner", "execution", "positions", "risk"];
-  const titles = { overview: "总览", accounts: "账户", scanner: "机会扫描", execution: "执行台", positions: "持仓", risk: "风控" };
+  const routes = ["overview", "accounts", "scanner", "execution", "positions", "risk", "admin"];
+  const titles = { overview: "总览", accounts: "账户", scanner: "机会扫描", execution: "执行台", positions: "持仓", risk: "风控", admin: "管理" };
 
   function parseHash() {
     const parts = (location.hash || "#/overview").replace(/^#\//, "").split("/");
@@ -1685,6 +1685,11 @@ import { CONV as D, api, download } from "./store.js";
 
   function go(route, push) {
     if (routes.indexOf(route) < 0) route = "overview";
+    if (route === "admin" && (!D.user || D.user.role !== "admin")) {
+      toast("仅管理员", "当前账号没有管理权限。", "neg");
+      history.replaceState(null, "", "#/overview");
+      route = "overview";
+    }
     app.route = route;
     $$(".view").forEach(v => { v.hidden = v.dataset.view !== route; });
     $$(".nav-item").forEach(n => {
@@ -1706,11 +1711,18 @@ import { CONV as D, api, download } from "./store.js";
     if (route === "risk") renderRisk();
     if (route === "accounts") renderAccounts();
     if (route === "execution") { renderOrders(); renderReviews(); renderAudit(); }
+    if (route === "admin") {
+      const tab = parseHash().id || "overview";
+      if (typeof window.__adminShow === "function") window.__adminShow(tab);
+    }
   }
 
   window.addEventListener("hashchange", function () {
     const h = parseHash();
     if (h.route !== app.route) go(h.route, false);
+    if (h.route === "admin" && app.route === "admin" && typeof window.__adminShow === "function") {
+      window.__adminShow(h.id || "overview");
+    }
     if (h.route === "scanner" && h.id && D.events.some(e => e.id === h.id)) {
       if (app.sel !== h.id) openDrawer(h.id);
     } else if (!$("#drawer-root").hidden) {
@@ -1721,6 +1733,11 @@ import { CONV as D, api, download } from "./store.js";
   /* ---------------- static bindings ---------------- */
   $$(".nav-item").forEach(n => n.addEventListener("click", e => { e.preventDefault(); go(n.dataset.route); }));
   $$("[data-nav]").forEach(el => el.addEventListener("click", () => go(el.dataset.nav)));
+
+  document.addEventListener("conv:open-account", e => {
+    const id = e.detail && e.detail.id;
+    if (id) void switchAccount(id, true);
+  });
 
   $("#acct-btn").addEventListener("click", e => { e.stopPropagation(); toggleAcctMenu(); });
   $("#acct-menu").addEventListener("click", e => {
@@ -1782,7 +1799,7 @@ import { CONV as D, api, download } from "./store.js";
     try { await api.post("/api/auth/logout"); } catch { /* session may already be gone */ }
     location.href = "/login";
   });
-  $("#admin-btn").addEventListener("click", () => { location.href = "/admin"; });
+  $("#admin-btn").addEventListener("click", () => { go("admin"); });
 
   $("#user-avatar").addEventListener("click", () => {
     openModal({
@@ -2162,14 +2179,19 @@ import { CONV as D, api, download } from "./store.js";
     if (e.key === "Escape") {
       closeAcctMenu();
       if (!$("#modal-root").hidden) { closeModal(); return; }
+      if (!$("#admin-modal").hidden) { return; }
       if (!$("#drawer-root").hidden) { closeDrawer(); return; }
     }
-    if (!$("#modal-root").hidden || !$("#drawer-root").hidden) return;
+    if (!$("#modal-root").hidden || !$("#drawer-root").hidden || !$("#admin-modal").hidden) return;
     const tag = (document.activeElement && document.activeElement.tagName) || "";
     if (/INPUT|SELECT|TEXTAREA/.test(tag)) return;
     if (e.metaKey || e.ctrlKey || e.altKey) return;
-    const map = { "1": "overview", "2": "accounts", "3": "scanner", "4": "execution", "5": "positions", "6": "risk" };
-    if (map[e.key]) { e.preventDefault(); go(map[e.key]); }
+    const map = { "1": "overview", "2": "accounts", "3": "scanner", "4": "execution", "5": "positions", "6": "risk", "7": "admin" };
+    if (map[e.key]) {
+      if (e.key === "7" && (!D.user || D.user.role !== "admin")) return;
+      e.preventDefault();
+      go(map[e.key]);
+    }
   });
 
   /* ---------------- live loop ---------------- */

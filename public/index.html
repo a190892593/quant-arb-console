@@ -6,6 +6,7 @@
 <title>CONVERGENCE · 跨场所事件套利终端</title>
 <meta name="description" content="Polymarket 事件合约与 Hyperliquid 永续之间的概率差扫描、两腿自动执行与风险控制台。">
 <link rel="stylesheet" href="assets/styles.css">
+<link rel="stylesheet" href="assets/admin.css">
 </head>
 <body>
 
@@ -72,6 +73,9 @@
       <a class="nav-item" href="#/risk" data-route="risk" title="风控 (6)">
         <svg class="ic" aria-hidden="true"><use href="#i-shield"/></svg><span class="nav-label">风控</span><span class="dot ok nav-dot" id="nav-risk-dot"></span><kbd>6</kbd>
       </a>
+      <a class="nav-item" href="#/admin" data-route="admin" title="管理 (7)" id="nav-admin" hidden>
+        <svg class="ic" aria-hidden="true"><use href="#i-sliders"/></svg><span class="nav-label">管理</span><kbd>7</kbd>
+      </a>
     </nav>
 
     <div class="rail-foot">
@@ -89,7 +93,7 @@
           <svg class="ic"><use href="#i-power"/></svg>
         </button>
       </div>
-      <a class="rail-note rail-admin-link" id="admin-link" href="/admin" hidden>进入管理后台 →</a>
+      <a class="rail-note rail-admin-link" id="admin-link" href="#/admin" hidden>进入管理 →</a>
       <p class="rail-note" id="data-mode-note">正在连接行情…</p>
     </div>
   </aside>
@@ -644,6 +648,191 @@
         </div>
       </section>
 
+      <!-- 管理（仅管理员） -->
+      <section class="view" data-view="admin" id="view-admin" hidden>
+        <div class="page-head">
+          <div class="page-head-main">
+            <div class="eyebrow">ADMIN · 系统管理 · 仅管理员</div>
+            <h1 id="admin-title">管理 · 概览</h1>
+            <p class="page-sub">账户、用户、场所、引擎、事件、风控、审计与数据。管理与交易共用同一会话，切回终端即可继续交易。</p>
+          </div>
+          <div class="page-actions">
+            <span class="admin-pill" id="env-pill"><span class="dot ok"></span>连接中</span>
+            <span class="admin-clock num" id="admin-clock">--:--:--</span>
+            <button class="btn btn-ghost" id="refresh-all"><svg class="ic"><use href="#i-refresh"/></svg>刷新</button>
+          </div>
+        </div>
+
+        <nav class="admin-tabs" id="admin-tabs" aria-label="管理模块">
+          <button class="admin-nav-item is-on" data-admin-tab="overview">概览</button>
+          <button class="admin-nav-item" data-admin-tab="users">用户与权限</button>
+          <button class="admin-nav-item" data-admin-tab="accounts">策略账户</button>
+          <button class="admin-nav-item" data-admin-tab="venues">场所连接</button>
+          <button class="admin-nav-item" data-admin-tab="strategy">策略与引擎</button>
+          <button class="admin-nav-item" data-admin-tab="events">事件目录</button>
+          <button class="admin-nav-item" data-admin-tab="risk">风控配置</button>
+          <button class="admin-nav-item" data-admin-tab="audit">审计日志</button>
+          <button class="admin-nav-item" data-admin-tab="data">数据与导出</button>
+        </nav>
+
+        <div class="admin-stack" id="admin-content">
+          <section class="admin-view" data-admin-view="overview">
+            <div class="admin-kpis" id="overview-kpis"></div>
+            <div class="admin-grid admin-grid-2">
+              <article class="admin-card">
+                <header><span class="eyebrow">场所连接</span><span class="admin-muted">实时状态</span></header>
+                <div id="overview-venues" class="admin-venue-list"></div>
+              </article>
+              <article class="admin-card">
+                <header><span class="eyebrow">系统</span><span class="admin-muted">进程与账本</span></header>
+                <dl class="admin-facts" id="overview-facts"></dl>
+              </article>
+            </div>
+            <article class="admin-card">
+              <header><span class="eyebrow">最近审计</span><a href="#" data-goto="audit">查看全部 →</a></header>
+              <div id="overview-audit" class="admin-table-wrap"></div>
+            </article>
+          </section>
+
+          <section class="admin-view" data-admin-view="users" hidden>
+            <div class="admin-bar">
+              <p class="admin-lede">账号、角色与会话。管理员可创建账号、调整角色、重置密码；交易员可下单，只读角色只能查看。</p>
+              <button class="admin-btn admin-btn-primary" id="new-user">新建用户</button>
+            </div>
+            <article class="admin-card">
+              <header><span class="eyebrow">账号列表</span><span class="admin-muted" id="users-count">—</span></header>
+              <div id="users-table" class="admin-table-wrap"></div>
+            </article>
+          </section>
+
+          <section class="admin-view" data-admin-view="accounts" hidden>
+            <div class="admin-bar">
+              <p class="admin-lede">四个策略账户各自独立：资金、持仓、限额、规则、熔断与自动执行互不共享。管理员可调整净值、启用状态、净边阈值与纸面成交延迟。</p>
+              <button class="admin-btn" id="refresh-accounts">刷新账户</button>
+            </div>
+            <div class="admin-kpis" id="accounts-kpis"></div>
+            <div class="admin-account-grid" id="accounts-grid"></div>
+            <article class="admin-card">
+              <header><span class="eyebrow">账户对比</span><span class="admin-muted">点行进入终端</span></header>
+              <div id="accounts-table" class="admin-table-wrap"></div>
+            </article>
+          </section>
+
+          <section class="admin-view" data-admin-view="venues" hidden>
+            <div class="admin-bar">
+              <p class="admin-lede">行情与交易通道。公开行情无需凭据；实盘下单需要服务端环境变量中的私有凭据与显式确认。</p>
+              <button class="admin-btn" id="test-venues">测试连接</button>
+            </div>
+            <div class="admin-grid admin-grid-2" id="venue-cards"></div>
+            <article class="admin-card">
+              <header><span class="eyebrow">交易通道配置</span><span class="admin-muted">只读 · 来自服务端环境</span></header>
+              <dl class="admin-facts" id="venue-config"></dl>
+              <div class="admin-note">
+                实盘凭据只从 <code>.env</code> 读取，绝不会写入数据库或返回给浏览器。启用实盘需要同时设置
+                <code>TRADING_MODE=live</code>、私有凭据、<code>LIVE_TRADING_ACK=I_UNDERSTAND_LIVE_TRADING</code>，
+                并在「策略与引擎」中打开实盘开关。
+              </div>
+            </article>
+          </section>
+
+          <section class="admin-view" data-admin-view="strategy" hidden>
+            <div class="admin-bar">
+              <p class="admin-lede">扫描间隔、成本模型与实盘开关是全局的；自动执行、净边阈值、成交延迟、限额与规则按账户独立。</p>
+              <div class="admin-bar-actions">
+                <span class="admin-label">限额账户</span>
+                <select id="strategy-account" class="admin-input" aria-label="限额所属账户"></select>
+                <button class="admin-btn admin-btn-primary" id="save-settings">保存设置</button>
+              </div>
+            </div>
+            <form class="admin-card admin-form" id="settings-form">
+              <header><span class="eyebrow">执行与扫描</span><span class="admin-muted">Engine</span></header>
+              <div class="admin-fields" id="settings-fields"></div>
+            </form>
+            <article class="admin-card">
+              <header><span class="eyebrow">风控限额</span><span class="admin-muted">当前账户 · 与交易终端共用</span></header>
+              <div id="strategy-limits" class="admin-table-wrap"></div>
+            </article>
+          </section>
+
+          <section class="admin-view" data-admin-view="events" hidden>
+            <div class="admin-bar">
+              <p class="admin-lede">当前扫描面。示例目录在 Polymarket 不可达时启用；实时目录来自 Gamma / CLOB。</p>
+              <div class="admin-bar-actions">
+                <input id="event-search" class="admin-input" type="search" placeholder="搜索事件、标的或来源">
+                <button class="admin-btn" id="refresh-catalog">重建目录</button>
+              </div>
+            </div>
+            <article class="admin-card">
+              <header><span class="eyebrow">事件列表</span><span class="admin-muted" id="events-count">—</span></header>
+              <div id="events-table" class="admin-table-wrap"></div>
+            </article>
+          </section>
+
+          <section class="admin-view" data-admin-view="risk" hidden>
+            <div class="admin-bar">
+              <p class="admin-lede">限额在下单前校验、成交后复核。每个策略账户有独立的限额与规则。</p>
+              <div class="admin-bar-actions">
+                <span class="admin-label">账户</span>
+                <select id="risk-account" class="admin-input" aria-label="风控所属账户"></select>
+                <button class="admin-btn" id="reset-limits-admin">恢复默认限额</button>
+              </div>
+            </div>
+            <article class="admin-card">
+              <header><span class="eyebrow">限额</span><span class="admin-muted">点击数值修改</span></header>
+              <div id="risk-limits" class="admin-table-wrap"></div>
+            </article>
+            <article class="admin-card">
+              <header><span class="eyebrow">规则开关</span><span class="admin-muted" id="rules-count">—</span></header>
+              <div id="rules-list" class="admin-rule-list"></div>
+            </article>
+          </section>
+
+          <section class="admin-view" data-admin-view="audit" hidden>
+            <div class="admin-bar">
+              <p class="admin-lede">所有开仓、补对冲、接管、平仓、熔断、限额与规则变更都会留痕。</p>
+              <div class="admin-bar-actions">
+                <select id="audit-actor" class="admin-input">
+                  <option value="">全部主体</option>
+                  <option>自动引擎</option>
+                  <option>风控</option>
+                </select>
+                <select id="audit-account" class="admin-input">
+                  <option value="">全部账户</option>
+                </select>
+                <input id="audit-search" class="admin-input" type="search" placeholder="搜索对象或详情">
+                <button class="admin-btn" id="export-audit">导出 CSV</button>
+              </div>
+            </div>
+            <article class="admin-card">
+              <header><span class="eyebrow">审计流</span><span class="admin-muted" id="audit-count">—</span></header>
+              <div id="audit-table" class="admin-table-wrap"></div>
+            </article>
+          </section>
+
+          <section class="admin-view" data-admin-view="data" hidden>
+            <div class="admin-bar">
+              <p class="admin-lede">导出、重置与运行环境。危险操作需要二次确认。</p>
+            </div>
+            <div class="admin-grid admin-grid-2">
+              <article class="admin-card">
+                <header><span class="eyebrow">导出</span><span class="admin-muted">JSON</span></header>
+                <p class="admin-p">完整状态、用户（不含密码哈希）、限额、规则与最近审计。</p>
+                <button class="admin-btn admin-btn-primary" id="export-json">下载完整导出</button>
+              </article>
+              <article class="admin-card admin-danger-card">
+                <header><span class="eyebrow">重置演示账本</span><span class="admin-muted">不可撤销</span></header>
+                <p class="admin-p">清空持仓、订单、待接管、审计、行情事件与净值曲线，并按当前行情重新生成一套演示账本。用户、限额与规则保留。</p>
+                <button class="admin-btn admin-btn-danger" id="reset-data">重置交易账本</button>
+              </article>
+            </div>
+            <article class="admin-card">
+              <header><span class="eyebrow">运行环境</span><span class="admin-muted">只读</span></header>
+              <dl class="admin-facts" id="data-facts"></dl>
+            </article>
+          </section>
+        </div>
+      </section>
+
     </main>
   </div>
 </div>
@@ -660,6 +849,17 @@
 
 <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
 
+<div class="admin-toasts" id="admin-toasts" aria-live="polite"></div>
+<div class="admin-modal-root" id="admin-modal" hidden>
+  <div class="admin-modal-scrim" data-modal-close></div>
+  <div class="admin-modal" role="dialog" aria-modal="true" aria-labelledby="admin-modal-title">
+    <div class="admin-modal-h"><h2 id="admin-modal-title">—</h2><button class="admin-modal-x" data-modal-close aria-label="关闭">×</button></div>
+    <div class="admin-modal-b" id="admin-modal-body"></div>
+    <div class="admin-modal-f" id="admin-modal-foot"></div>
+  </div>
+</div>
+
 <script type="module" src="assets/app.js"></script>
+<script type="module" src="assets/admin.js"></script>
 </body>
 </html>

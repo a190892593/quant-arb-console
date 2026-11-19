@@ -5,8 +5,7 @@
 
 这是原单页原型（`event-arb-console.html` + 内存模拟）的**全栈实现**：
 
-- **前台**：六个工作区，新增「账户」矩阵；四个策略账户各自独立，切换账户即切换整套资金/持仓/限额/熔断。
-- **后台**：独立的 `/admin` 管理控制台，管理用户、策略账户、场所、引擎、事件目录、风控、审计与数据。
+- **前台 + 管理**：同一个终端壳。管理员在左侧「管理」工作区（`#/admin`）完成账户、用户、场所、引擎、事件、风控、审计与数据操作；非管理员看不到入口。整体沿用石墨蓝黑 + 信号青，不再切换独立后台。
 - **后端**：Node.js 22 + TypeScript 严格模式、Fastify、内置 SQLite、SSE 推送、会话认证与 CSRF 防护。
 - **交易所**：Hyperliquid 公共行情已接入并实测；Polymarket 适配器已实现（Gamma + CLOB），
   并带有网络不可达时的显式降级；实盘下单通道需要服务端私有凭据。
@@ -31,11 +30,11 @@ npm start
 
 | 账号 | 密码 | 角色 | 权限 |
 |---|---|---|---|
-| `admin@convergence.local` | `Admin!2345` | admin | 全部权限 + 管理后台 |
+| `admin@convergence.local` | `Admin!2345` | admin | 全部权限 + 管理 |
 | `trader@convergence.local` | `Trader!2345` | trader | 下单、补对冲、平仓、改限额/规则 |
 | `analyst@convergence.local` | `Analyst!2345` | analyst | 只读 |
 
-> 默认口令只用于首次本地启动。登录后点击左上角头像可修改密码；管理员也可在后台重置。
+> 默认口令只用于首次本地启动。登录后点击左上角头像可修改密码；管理员也可在管理中重置。
 > 生产部署必须更换默认口令，并设置 `COOKIE_SECURE=true`（HTTPS）。
 
 ### 环境检查
@@ -65,7 +64,7 @@ npm run doctor
 - `demo`：不请求 Polymarket，只使用示例盘口；Hyperliquid 行情仍为实时。
 
 示例目录不是随机数字：它按当前 HL 标记价、期限与已实现波动率计算数字期权公允价，再生成
-Polymarket 侧的示例买卖价。界面上会显示 `PM 示例盘口`，管理后台也会标记 `demo`。
+Polymarket 侧的示例买卖价。界面上会显示 `PM 示例盘口`，管理视图也会标记 `demo`。
 
 ### 启用实盘（谨慎）
 
@@ -77,7 +76,7 @@ Polymarket 侧的示例买卖价。界面上会显示 `PM 示例盘口`，管理
    TRADING_MODE=live
    LIVE_TRADING_ACK=I_UNDERSTAND_LIVE_TRADING
    ```
-5. 重启服务，用管理员登录 `/admin` → 「策略与引擎」→ 打开「启用实盘执行」。
+5. 重启服务，用管理员登录，进入「管理」→「策略与引擎」→ 打开「启用实盘执行」。
 6. 先用最小规模验证一条完整的两腿链路，再放开限额。
 
 私有凭据只从环境变量读取，**不会写入数据库、不会返回浏览器、不会出现在日志中**。
@@ -97,6 +96,7 @@ Polymarket 侧的示例买卖价。界面上会显示 `PM 示例盘口`，管理
 | **执行台** | 两腿进度、对冲缺口、补对冲、立即平仓、归档、待接管队列（倒计时自动平仓）、审计日志 |
 | **持仓** | 合约腿/对冲腿账本、对冲比例、Delta、未实现盈亏、按标的与期限分布、补对冲、对齐全部、建立组合、全部平仓 |
 | **风控** | 分级熔断、5 项限额在线修改、规则开关、结算风险日历、风控事件流 |
+| **管理** | 仅管理员可见：概览、用户与权限、策略账户、场所连接、策略与引擎、事件目录、风控配置、审计日志、数据与导出 |
 
 ### 四个独立策略账户
 
@@ -134,7 +134,7 @@ Polymarket 侧的示例买卖价。界面上会显示 `PM 示例盘口`，管理
 | 结算敞口 | 净值 35% | 净值 90% | 净值 40% | 净值 55% |
 | 单事件集中度 | 15% | 15% | 15% | 15% |
 
-限额可在前台「风控」或后台「风控配置」按账户修改；恢复默认只重置当前账户。
+限额可在前台「风控」或管理「风控配置」按账户修改；恢复默认只重置当前账户。
 净值不能低于该账户已部署资金的 98%。
 
 **五条账户级规则**
@@ -165,10 +165,12 @@ Polymarket 侧的示例买卖价。界面上会显示 `PM 示例盘口`，管理
 
 - 登录/登出/修改密码；管理员入口。
 - 实时 SSE 推送 + 轮询兜底；断线不影响已有状态。
-- `1–6` 切视图、`Esc` 关闭浮层、`Enter` 展开机会/持仓。
+- `1–7` 切视图（`7` 仅管理员）、`Esc` 关闭浮层、`Enter` 展开机会/持仓。
 - 桌面、平板、手机三档响应式；移动端机会表切换为卡片列表，页面不横滚。
 
-### 后台 `/admin`
+### 管理（`#/admin`，仅管理员）
+
+管理与交易终端**合并为同一个壳**：左侧导航的「管理」只在管理员登录时出现，9 个模块在同一页面内切换，视觉延续石墨黑 + 信号青。旧地址 `/admin` 会 302 到 `/#/admin`，非管理员访问会落回总览。
 
 | 模块 | 能力 |
 |---|---|
@@ -184,9 +186,9 @@ Polymarket 侧的示例买卖价。界面上会显示 `PM 示例盘口`，管理
 
 ![账户矩阵](preview/live-accounts.png)
 
-![管理后台 · 策略账户](preview/live-admin-accounts.png)
+![管理 · 策略账户](preview/live-admin-accounts.png)
 
-![管理后台 · 策略与引擎](preview/live-admin-strategy.png)
+![管理 · 策略与引擎](preview/live-admin-strategy.png)
 
 ### 引擎（服务端）
 
@@ -203,16 +205,15 @@ Polymarket 侧的示例买卖价。界面上会显示 `PM 示例盘口`，管理
 ## 4. 架构
 
 ```
-public/                    前台 + 登录 + 管理后台（原生 ES Modules，无构建）
-  index.html               交易终端骨架（原设计保留）
+public/                    终端 + 管理 + 登录（原生 ES Modules，无构建）
+  index.html               交易终端与管理视图的统一骨架
   login.html               登录
-  admin.html               管理后台
-  assets/app.js            终端交互层（API 驱动）
+  assets/app.js            终端交互层、账户切换、路由与键盘
   assets/store.js          快照存储、SSE、CSRF、API 客户端
-  assets/admin.js          后台
-  assets/styles.css        原设计 token 与组件
+  assets/admin.js          管理视图（同一壳内挂载）
+  assets/styles.css        终端 token 与组件
   assets/login.css         登录样式
-  assets/admin.css         后台样式
+  assets/admin.css         管理视图表格/表单/标签与工作区外壳
 src/
   index.ts                 启动、种子、优雅退出
   server/app.ts            Fastify 路由、认证/CSRF/限流、静态资源、SSE
@@ -265,7 +266,7 @@ data/convergence.db        SQLite（首次启动生成，已 gitignore）
 | POST | `/api/risk/kill` / `auto` | 指定账户熔断、自动执行开关 |
 | PUT | `/api/risk/limits/:id`；PATCH `/api/risk/rules/:id` | 指定账户限额 / 规则 |
 | GET | `/api/export/opportunities.csv?account=` | 指定账户机会 CSV（含账户列） |
-| GET/POST | `/api/admin/users`、`/accounts`、`/settings?account=`、`/status`、`/audit`、`/venues/test`、`/catalog/refresh`、`/data/reset`、`/export` | 管理后台 |
+| GET/POST | `/api/admin/users`、`/accounts`、`/settings?account=`、`/status`、`/audit`、`/venues/test`、`/catalog/refresh`、`/data/reset`、`/export` | 管理 API |
 | GET/PATCH | `/api/admin/accounts`、`/api/admin/accounts/:id` | 账户摘要、净值/启用/阈值/延迟 |
 | POST | `/api/admin/accounts/:id/kill` | 管理员熔断/解除指定账户 |
 
@@ -276,13 +277,13 @@ data/convergence.db        SQLite（首次启动生成，已 gitignore）
 - 所有变更校验 CSRF Token、Origin 与角色。
 - 参数用 Zod 校验；SQL 全部参数化；静态资源拒绝路径穿越。
 - 安全响应头：CSP、`X-Frame-Options: DENY`、`nosniff`、Referrer-Policy。
-- 私有密钥仅在环境变量中；后台只显示“已配置/未配置”。
+- 私有密钥仅在环境变量中；管理只显示“已配置/未配置”。
 
 ## 7. 验证
 
 ```powershell
 npm test          # 30 项：领域定价、四账户资格、风控、API 集成（下单/成交/熔断/权限/CSRF/CSV）
-npm run verify    # 33 项：启动真实服务 + headless Chromium 全流程 + 账户切换 + 后台 + 移动端
+npm run verify    # 33 项：启动真实服务 + headless Chromium 全流程 + 账户切换 + 管理视图 + 移动端
 ```
 
 `npm run verify` 使用隔离的临时数据库和随机端口，不会影响 `data/convergence.db`；
@@ -291,7 +292,7 @@ npm run verify    # 33 项：启动真实服务 + headless Chromium 全流程 + 
 ## 8. 数据与重置
 
 - 数据库：`data/convergence.db`（SQLite，WAL）。
-- 重置演示账本：`/admin` → 「数据与导出」→ 输入 `RESET` 确认。
+- 重置演示账本：管理 → 「数据与导出」→ 输入 `RESET` 确认。
 - 清空全部数据：停止服务后删除 `data/convergence.db*`，下次启动重新种子。
 - 演示净值曲线、用户、限额、规则与示例事件在首次启动时生成；行情随 HL 实时更新。
 
@@ -309,7 +310,7 @@ npm run verify    # 33 项：启动真实服务 + headless Chromium 全流程 + 
 
 ## 10. 设计稿
 
-原设计契约保留在 [DESIGN.md](DESIGN.md)；交易终端保留了石墨蓝黑、信号青、双轨母题与
+原设计契约保留在 [DESIGN.md](DESIGN.md)；终端保留石墨蓝黑、信号青、双轨母题与
 `Bahnschrift / Segoe UI / Cascadia Mono` 系统字体栈。
-管理后台刻意采用浅色 slate + 行政蓝，作为与交易终端不同的产品表面，避免把后台误当成下单界面；
-新增的账户矩阵、登录页与后台延续同一套信息密度与排版规则。
+管理视图已并入同一个壳，沿用同一套深色 token、卡片与按钮语言，只在页面级用
+「ADMIN · 系统管理」眉标、横向模块 tabs 和信息密度区分配置与下单；不再有第二套浅色后台。
