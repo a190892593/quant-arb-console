@@ -104,12 +104,14 @@ export function buildState(
       paperFillMs: selected.paperFillMs,
       scanIntervalMs: global.scanIntervalMs,
       liveTradingEnabled: global.liveTradingEnabled,
+      paperTradingEnabled: global.paperTradingEnabled,
       cost: global.cost
     },
     engine: {
       marketDataMode: market.mode,
       catalogMode: market.catalogMode,
       tradingMode: engine.tradingMode(),
+      paperTradingEnabled: global.paperTradingEnabled,
       liveBlockedReason: engine.liveBlockedReason(),
       liveConfigured: live.all,
       liveAcknowledged: live.acknowledged,

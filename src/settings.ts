@@ -8,6 +8,7 @@ export interface AppSettings {
   scanIntervalMs: number;
   cost: CostConfig;
   liveTradingEnabled: boolean;
+  paperTradingEnabled: boolean;
   startedAt: number;
 }
 
@@ -15,6 +16,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   scanIntervalMs: 2500,
   cost: { ...DEFAULT_COST },
   liveTradingEnabled: false,
+  paperTradingEnabled: true,
   startedAt: Date.now()
 };
 

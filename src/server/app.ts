@@ -459,6 +459,13 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
     return { ok: true, state: stateFor(a, body.accountId) };
   });
 
+  app.post("/api/simulation", async (req) => {
+    const a = requireTrader(req);
+    const body = parse(z.object({ accountId: accountEnum, enabled: z.boolean() }), req.body);
+    const next = engine.setPaperTrading(actorOf(a), body.accountId, body.enabled);
+    return { ok: true, paperTradingEnabled: next.paperTradingEnabled, state: stateFor(a, body.accountId) };
+  });
+
   app.put("/api/risk/limits/:id", async (req) => {
     const a = requireTrader(req);
     const { id } = parse(z.object({ id: z.string().min(1).max(40) }), req.params);

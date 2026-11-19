@@ -55,26 +55,26 @@
     </div>
 
     <nav class="nav" aria-label="主导航">
-      <a class="nav-item" href="#/overview" data-route="overview" title="总览 (1)">
-        <svg class="ic" aria-hidden="true"><use href="#i-grid"/></svg><span class="nav-label">总览</span><kbd>1</kbd>
+      <a class="nav-item" href="#/overview" data-route="overview" title="总览（快捷键 1）">
+        <svg class="ic" aria-hidden="true"><use href="#i-grid"/></svg><span class="nav-label">总览</span>
       </a>
-      <a class="nav-item" href="#/accounts" data-route="accounts" title="账户 (2)">
-        <svg class="ic" aria-hidden="true"><use href="#i-layers"/></svg><span class="nav-label">账户</span><kbd>2</kbd>
+      <a class="nav-item" href="#/accounts" data-route="accounts" title="账户（快捷键 2）">
+        <svg class="ic" aria-hidden="true"><use href="#i-layers"/></svg><span class="nav-label">账户</span>
       </a>
-      <a class="nav-item" href="#/scanner" data-route="scanner" title="机会扫描 (3)">
-        <svg class="ic" aria-hidden="true"><use href="#i-radar"/></svg><span class="nav-label">机会扫描</span><span class="nav-badge" id="nav-scan-count">28</span><kbd>3</kbd>
+      <a class="nav-item" href="#/scanner" data-route="scanner" title="机会扫描（快捷键 3）">
+        <svg class="ic" aria-hidden="true"><use href="#i-radar"/></svg><span class="nav-label">机会扫描</span><span class="nav-badge" id="nav-scan-count">28</span>
       </a>
-      <a class="nav-item" href="#/execution" data-route="execution" title="执行台 (4)">
-        <svg class="ic" aria-hidden="true"><use href="#i-legs"/></svg><span class="nav-label">执行台</span><span class="nav-badge nav-badge-warn" id="nav-exec-count">3</span><kbd>4</kbd>
+      <a class="nav-item" href="#/execution" data-route="execution" title="执行台（快捷键 4）">
+        <svg class="ic" aria-hidden="true"><use href="#i-legs"/></svg><span class="nav-label">执行台</span><span class="nav-badge nav-badge-warn" id="nav-exec-count">3</span>
       </a>
-      <a class="nav-item" href="#/positions" data-route="positions" title="持仓 (5)">
-        <svg class="ic" aria-hidden="true"><use href="#i-wallet"/></svg><span class="nav-label">持仓</span><kbd>5</kbd>
+      <a class="nav-item" href="#/positions" data-route="positions" title="持仓（快捷键 5）">
+        <svg class="ic" aria-hidden="true"><use href="#i-wallet"/></svg><span class="nav-label">持仓</span>
       </a>
-      <a class="nav-item" href="#/risk" data-route="risk" title="风控 (6)">
-        <svg class="ic" aria-hidden="true"><use href="#i-shield"/></svg><span class="nav-label">风控</span><span class="dot ok nav-dot" id="nav-risk-dot"></span><kbd>6</kbd>
+      <a class="nav-item" href="#/risk" data-route="risk" title="风控（快捷键 6）">
+        <svg class="ic" aria-hidden="true"><use href="#i-shield"/></svg><span class="nav-label">风控</span><span class="dot ok nav-dot" id="nav-risk-dot"></span>
       </a>
-      <a class="nav-item" href="#/admin" data-route="admin" title="管理 (7)" id="nav-admin" hidden>
-        <svg class="ic" aria-hidden="true"><use href="#i-sliders"/></svg><span class="nav-label">管理</span><kbd>7</kbd>
+      <a class="nav-item" href="#/admin" data-route="admin" title="管理（快捷键 7）" id="nav-admin" hidden>
+        <svg class="ic" aria-hidden="true"><use href="#i-sliders"/></svg><span class="nav-label">管理</span>
       </a>
     </nav>
 
@@ -136,8 +136,14 @@
           </button>
         </div>
         <span class="top-clock"><b class="num" id="clock">18:42:03</b><em>CST</em></span>
+        <div class="sim-toggle" id="sim-toggle" title="模拟交易总开关：开启后新订单按真实盘口仿真成交">
+          <span class="auto-label sim-label" id="sim-label">模拟交易</span>
+          <span class="sim-mini" id="sim-mini">模拟</span>
+          <button class="switch switch-sm" id="sim-switch" role="switch" aria-checked="true" aria-label="模拟交易总开关"><span class="knob"></span></button>
+        </div>
         <div class="auto-toggle">
           <span class="auto-label">自动执行</span>
+          <span class="auto-mini">自动</span>
           <button class="switch" id="auto-switch" role="switch" aria-checked="true" aria-label="自动执行开关"><span class="knob"></span></button>
         </div>
         <button class="btn-kill" id="kill-btn">
@@ -479,6 +485,15 @@
             <button class="btn btn-ghost" id="flatten-all-btn">全部平仓</button>
             <button class="btn btn-ghost" id="sync-btn"><svg class="ic"><use href="#i-refresh"/></svg>同步场所</button>
           </div>
+        </div>
+
+        <div class="sim-strip" id="sim-strip">
+          <span class="sim-strip-dot" id="sim-strip-dot"></span>
+          <div class="sim-strip-copy">
+            <b id="sim-strip-title">模拟交易进行中</b>
+            <span id="sim-strip-text">新订单按真实 Polymarket / Hyperliquid 盘口仿真成交，可在「持仓」查看盈亏。</span>
+          </div>
+          <button class="btn btn-ghost btn-sm" id="sim-strip-btn">暂停模拟</button>
         </div>
 
         <div class="card kpi-strip kpi-strip-4">

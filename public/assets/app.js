@@ -167,12 +167,17 @@ import { CONV as D, api, download } from "./store.js";
   }
 
   /* ---------------- system state ---------------- */
+  function paperEnabled() {
+    return !D.engine || D.engine.paperTradingEnabled !== false;
+  }
+
   function updateSystem() {
     const banner = $("#global-banner");
     const killBtn = $("#kill-btn");
     const sw = $("#auto-switch");
     const acct = currentAcct();
     const acctLabel = acct ? acctCode(acct.id) + " " + acct.name : "当前账户";
+    const sim = paperEnabled();
 
     if (app.kill) {
       banner.hidden = false;
@@ -182,6 +187,14 @@ import { CONV as D, api, download } from "./store.js";
       $("#banner-action").textContent = "去解除";
       killBtn.classList.add("is-armed");
       killBtn.querySelector("span").textContent = "已熔断";
+    } else if (!sim) {
+      banner.hidden = false;
+      banner.classList.remove("is-kill");
+      $("#banner-title").textContent = "模拟交易已暂停";
+      $("#banner-text").textContent = "新开仓已暂停；已有持仓仍可平仓与对齐。到执行台开启模拟交易。";
+      $("#banner-action").textContent = "去执行台";
+      killBtn.classList.remove("is-armed");
+      killBtn.querySelector("span").textContent = "熔断";
     } else if (!app.auto) {
       banner.hidden = false;
       banner.classList.remove("is-kill");
@@ -202,13 +215,36 @@ import { CONV as D, api, download } from "./store.js";
     if (sw.parentElement.querySelector(".auto-label")) {
       sw.parentElement.querySelector(".auto-label").textContent = app.kill ? "已停止" : "自动执行";
     }
+    const simSw = $("#sim-switch");
+    if (simSw) {
+      simSw.setAttribute("aria-checked", String(sim));
+      simSw.disabled = !D.user || D.user.role === "analyst";
+    }
+    const simToggle = $("#sim-toggle");
+    if (simToggle) simToggle.classList.toggle("is-off", !sim);
+    const simLabel = $("#sim-label");
+    if (simLabel) simLabel.textContent = sim ? "模拟交易" : "模拟暂停";
+    const simMini = $("#sim-mini");
+    if (simMini) simMini.textContent = sim ? "模拟" : "暂停";
+    const strip = $("#sim-strip");
+    if (strip) {
+      strip.classList.toggle("is-off", !sim);
+      const stripTitle = $("#sim-strip-title");
+      const stripText = $("#sim-strip-text");
+      const stripBtn = $("#sim-strip-btn");
+      if (stripTitle) stripTitle.textContent = sim ? "模拟交易进行中" : "模拟交易已暂停";
+      if (stripText) stripText.textContent = sim
+        ? "新订单按真实 Polymarket / Hyperliquid 盘口仿真成交，可在「持仓」查看盈亏。"
+        : "新开仓已暂停；已有持仓仍可平仓与对齐。开启后按真实盘口继续仿真成交。";
+      if (stripBtn) stripBtn.textContent = sim ? "暂停模拟" : "开启模拟";
+    }
     killBtn.disabled = acct ? !acct.enabled : false;
 
-    $("#sys-mode").textContent = app.kill ? "已熔断 · 人工接管" : app.auto ? "全自动 · 可接管" : "暂停执行 · 仅监控";
-    $("#sys-mode").className = app.kill ? "neg" : app.auto ? "ok" : "warn";
+    $("#sys-mode").textContent = app.kill ? "已熔断 · 人工接管" : !sim ? "模拟暂停 · 仅平仓" : app.auto ? "全自动 · 可接管" : "暂停执行 · 仅监控";
+    $("#sys-mode").className = app.kill ? "neg" : !sim || !app.auto ? "warn" : "ok";
     const chip = $("#sys-chip");
-    chip.className = "chip " + (app.kill ? "chip-neg" : app.auto ? "chip-ok" : "chip-warn");
-    chip.innerHTML = '<span class="dot ' + (app.kill ? "bad" : app.auto ? "ok" : "warn") + '"></span>' + (app.kill ? "已熔断" : app.auto ? "全部正常" : "自动执行暂停");
+    chip.className = "chip " + (app.kill ? "chip-neg" : !sim || !app.auto ? "chip-warn" : "chip-ok");
+    chip.innerHTML = '<span class="dot ' + (app.kill ? "bad" : !sim || !app.auto ? "warn" : "ok") + '"></span>' + (app.kill ? "已熔断" : !sim ? "模拟暂停" : app.auto ? "全部正常" : "自动执行暂停");
 
     $("#risk-state").innerHTML = '<span class="dot ' + (app.kill ? "bad" : "ok") + '"></span>' +
       (app.kill ? "本账户已熔断 · 等待人工解除" : "本账户正常 · 独立护栏");
@@ -540,6 +576,7 @@ import { CONV as D, api, download } from "./store.js";
     const ready = rows.filter(r => r.status === "ready").length;
     const active = rows.filter(r => r.status === "active").length;
     $("#nav-scan-count").textContent = signals;
+    $("#nav-scan-count").style.display = signals ? "" : "none";
     $("#nav-exec-count").textContent = app.reviews.length;
     $("#nav-exec-count").style.display = app.reviews.length ? "" : "none";
     $("#kpi-opps").textContent = signals;
@@ -585,11 +622,13 @@ import { CONV as D, api, download } from "./store.js";
     set("#venue-hl", hl);
     const note = $("#data-mode-note");
     if (note) {
+      const sim = paperEnabled();
+      const exec = D.engine.tradingMode === "live" ? "实盘执行" : sim ? "纸面撮合" : "模拟暂停";
       if (D.engine.catalogMode === "live") {
-        note.textContent = "实时行情 · PM 已接入 · HL 已接入 · " + (D.engine.tradingMode === "live" ? "实盘执行" : "纸面撮合");
+        note.textContent = "实时行情 · PM 已接入 · HL 已接入 · " + exec;
       } else {
         const hlOk = hl?.state === "ok";
-        note.textContent = (hlOk ? "HL 实时行情" : "HL 不可达") + " · PM 离线 · 扫描暂停 · " + (D.engine.tradingMode === "live" ? "实盘执行" : "纸面撮合");
+        note.textContent = (hlOk ? "HL 实时行情" : "HL 不可达") + " · PM 离线 · 扫描暂停 · " + exec;
       }
       if (D.engine.liveBlockedReason) note.textContent += " · 实盘未启用";
       note.title = [pm?.message, hl?.message, D.engine.liveBlockedReason].filter(Boolean).join("\n");
@@ -599,9 +638,10 @@ import { CONV as D, api, download } from "./store.js";
     const modeChip = $("#acct-mode");
     if (modeChip) {
       const live = D.engine.tradingMode === "live";
-      modeChip.innerHTML = '<span class="dot ' + (live ? "ok" : "warn") + '"></span>' + (live ? "实盘" : "纸面");
-      modeChip.className = "chip " + (live ? "chip-live" : "chip-warn");
-      modeChip.title = D.engine.liveBlockedReason || (live ? "实盘执行已启用" : "纸面撮合：不会向交易所发送真实订单");
+      const sim = paperEnabled();
+      modeChip.innerHTML = '<span class="dot ' + (live ? "ok" : sim ? "warn" : "bad") + '"></span>' + (live ? "实盘" : sim ? "纸面" : "模拟暂停");
+      modeChip.className = "chip " + (live ? "chip-live" : sim ? "chip-warn" : "chip-neg");
+      modeChip.title = D.engine.liveBlockedReason || (live ? "实盘执行已启用" : sim ? "纸面撮合：不会向交易所发送真实订单" : "模拟交易已暂停：不会新开仓");
     }
   }
 
@@ -616,6 +656,8 @@ import { CONV as D, api, download } from "./store.js";
     if (email) email.textContent = u.email;
     const isAdmin = u.role === "admin";
     [$("#nav-admin"), $("#admin-link"), $("#admin-btn")].forEach(el => { if (el) el.hidden = !isAdmin; });
+    const simSw = $("#sim-switch");
+    if (simSw) simSw.disabled = u.role === "analyst";
     const humanChip = $('#audit-chips [data-actor="林 · 自营"]');
     if (humanChip) { humanChip.dataset.actor = u.name; humanChip.textContent = "人工操作"; }
   }
@@ -673,8 +715,9 @@ import { CONV as D, api, download } from "./store.js";
     const mode = $("#acct-mode");
     if (mode) {
       const live = D.engine && D.engine.tradingMode === "live";
-      mode.className = "chip " + (live ? "chip-warn" : "chip-mute");
-      mode.innerHTML = '<span class="dot ' + (live ? "warn" : "") + '"></span>' + (live ? "实盘" : "纸面");
+      const sim = paperEnabled();
+      mode.className = "chip " + (live ? "chip-warn" : sim ? "chip-mute" : "chip-neg");
+      mode.innerHTML = '<span class="dot ' + (live ? "warn" : sim ? "" : "bad") + '"></span>' + (live ? "实盘" : sim ? "纸面" : "模拟暂停");
     }
     const sub = $("#acct-sub");
     if (sub) sub.innerHTML = '<span class="dot ok"></span>独立账本 · 4 个账户互不共享';
@@ -1716,6 +1759,8 @@ import { CONV as D, api, download } from "./store.js";
       if (on) n.setAttribute("aria-current", "page"); else n.removeAttribute("aria-current");
     });
     $("#viewport").scrollTop = 0;
+    const navList = $(".nav");
+    if (navList) navList.scrollTop = 0;
     document.title = "CONVERGENCE · " + titles[route];
     // 详情抽屉只属于扫描器：切到别的视图还挂着它，会遮住刚切过去的页面。
     if (!$("#drawer-root").hidden && route !== "scanner") closeDrawer();
@@ -1811,6 +1856,30 @@ import { CONV as D, api, download } from "./store.js";
 
   $("#kill-btn").addEventListener("click", killModal);
   $("#kill-page-btn").addEventListener("click", killModal);
+
+  async function toggleSimulation() {
+    if (!D.user || D.user.role === "analyst") {
+      toast("无操作权限", "模拟交易开关仅管理员与交易员可操作。", "neg");
+      return;
+    }
+    const next = !paperEnabled();
+    try {
+      await api.post("/api/simulation", { accountId: app.accountId, enabled: next });
+    } catch (err) {
+      toast("操作失败", err.message || String(err), "neg");
+      return;
+    }
+    syncFromState();
+    updateSystem();
+    renderVenues();
+    if (app.route === "execution") renderOrders();
+    toast(next ? "模拟交易已开启" : "模拟交易已暂停",
+      next ? "新订单会按真实 PM / HL 盘口仿真成交，可在「持仓」观察盈亏。" : "新开仓已暂停；已有持仓仍可平仓与对齐。",
+      next ? "ok" : "warn");
+  }
+  $("#sim-switch").addEventListener("click", toggleSimulation);
+  $("#sim-strip-btn").addEventListener("click", toggleSimulation);
+
   $("#banner-action").addEventListener("click", () => go(app.kill ? "risk" : "execution"));
 
   $("#logout-btn").addEventListener("click", async () => {

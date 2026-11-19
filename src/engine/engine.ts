@@ -171,6 +171,7 @@ export class Engine {
     const account = this.account(accountId);
     const def = accountDef(accountId);
     if (!account.auto || account.kill || !account.enabled) return;
+    if (!this.paperTradingEnabled()) return;
     if (!config.seedTestFixture && config.marketDataMode !== "demo" && this.market.pmStatus.state !== "ok") return;
     const last = this.lastAutoAt.get(accountId) ?? 0;
     if (Date.now() - last < 60_000) return;
@@ -404,6 +405,9 @@ export class Engine {
     if (!isAccountId(input.accountId)) throw new EngineError("account_invalid", "账户不存在", 404);
     const account = this.account(input.accountId);
     if (!account.enabled) throw new EngineError("account_disabled", "该账户已被管理员停用", 409);
+    if (!this.paperTradingEnabled()) {
+      throw new EngineError("simulation_paused", "模拟交易已暂停；打开顶部「模拟交易」后再下单，已有头寸仍可平仓", 409);
+    }
     if (!config.seedTestFixture && config.marketDataMode !== "demo" && this.market.pmStatus.state !== "ok") {
       throw new EngineError("pm_offline", "Polymarket 实时目录未连接，暂停新开仓；已有头寸仍可平仓", 409);
     }
@@ -818,6 +822,9 @@ export class Engine {
   createCombo(user: Actor, accountId: AccountId, input: { eventId: string; sizeUsd: number }): Position {
     const account = this.account(accountId);
     if (!account.enabled) throw new EngineError("account_disabled", "该账户已被管理员停用", 409);
+    if (!this.paperTradingEnabled()) {
+      throw new EngineError("simulation_paused", "模拟交易已暂停；打开顶部「模拟交易」后再建仓", 409);
+    }
     const d = this.derived(accountId).find(r => r.id === input.eventId);
     if (!d) throw new EngineError("event_not_found", "事件不存在或不属于该账户策略", 404);
     if (!(input.sizeUsd >= 1000)) throw new EngineError("size_too_small", "最低 1,000 USDC");
@@ -983,6 +990,25 @@ export class Engine {
     saveAccountSettings(this.repo, accountId, { auto: enabled });
     this.log(user, accountId, "自动执行", enabled ? "开启" : "暂停", "账户", enabled ? "满足阈值的信号进入自动执行" : "信号只推送，不自动下单");
     this.touch();
+  }
+
+  /** Global paper-trading master switch. Off blocks new orders; closing/aligning stays available. */
+  setPaperTrading(user: Actor, accountId: AccountId, enabled: boolean): AppSettings {
+    const next = saveSettings(this.repo, { paperTradingEnabled: enabled });
+    this.log(user, accountId, enabled ? "开启模拟交易" : "暂停模拟交易", "全局模拟引擎", "纸面",
+      enabled ? "自动与人工订单恢复按真实 PM/HL 盘口仿真成交" : "新开仓暂停；已有持仓仍可平仓与对齐");
+    this.feed(accountId, {
+      kind: enabled ? "ok" : "warn",
+      title: enabled ? "模拟交易已开启" : "模拟交易已暂停",
+      detail: enabled ? "自动与人工订单按真实盘口仿真成交" : "只允许平仓与对齐，不再新开仓",
+      val: enabled ? "ON" : "OFF"
+    });
+    this.touch();
+    return next;
+  }
+
+  private paperTradingEnabled(): boolean {
+    return getSettings(this.repo).paperTradingEnabled !== false;
   }
 
   updateLimit(user: Actor, accountId: AccountId, id: string, value: number): Limit {

@@ -319,6 +319,7 @@ export interface VenueStatus {
 export interface EngineStatus {
   marketDataMode: "live" | "demo" | "auto";
   tradingMode: "paper" | "live";
+  paperTradingEnabled: boolean;
   liveConfigured: boolean;
   liveAcknowledged: boolean;
   liveEnabled: boolean;
