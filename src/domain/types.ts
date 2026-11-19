@@ -1,7 +1,7 @@
 export type Role = "admin" | "trader" | "analyst";
 export type EventStatus = "ready" | "watch" | "review" | "active";
 export type EventSource = "demo" | "polymarket";
-export type AccountId = "prob" | "converge" | "latency" | "longvol";
+export type AccountId = "prob" | "converge" | "latency" | "longvol" | "complete";
 export type StrategyId = AccountId;
 
 export interface AccountSettings {
@@ -105,6 +105,7 @@ export interface EventContract {
   conf: number;
   delta: number;
   src: string;
+  kind?: "binary" | "complete";
   source: EventSource;
   model?: ModelSpec;
   external?: ExternalRef;

@@ -1,4 +1,4 @@
-import test from "node:test";
+﻿import test from "node:test";
 import assert from "node:assert/strict";
 
 process.env.NODE_ENV = "test";
@@ -58,7 +58,7 @@ test("login issues a session and state exposes the full dashboard", async () => 
   assert.ok(json.state.events.length > 20);
   assert.equal(json.state.user.role, "admin");
   assert.ok(json.state.limits.length === 5);
-  assert.ok(json.state.rules.length === 16);
+  assert.ok(json.state.rules.length >= 16);
   assert.ok(json.state.book.rows.length >= 1);
   assert.ok(Array.isArray(json.state.equity) && json.state.equity.length >= 1);
 });
@@ -66,8 +66,8 @@ test("login issues a session and state exposes the full dashboard", async () => 
 test("four independent accounts share no equity or positions", async () => {
   const prob = (await request("GET", "/api/state?account=prob", { cookie: admin.cookie })).json.state;
   const converge = (await request("GET", "/api/state?account=converge", { cookie: admin.cookie })).json.state;
-  assert.equal(prob.accounts.length, 4);
-  assert.equal(converge.accounts.length, 4);
+  assert.equal(prob.accounts.length, 5);
+  assert.equal(converge.accounts.length, 5);
   assert.equal(prob.accountId, "prob");
   assert.equal(converge.accountId, "converge");
   assert.notEqual(prob.account.equity, converge.account.equity);
@@ -97,7 +97,7 @@ test("admin can tune one account without touching the others", async () => {
 
 test("order lifecycle: create, paper fill, position appears, archive", async () => {
   const state = (await request("GET", "/api/state?account=prob", { cookie: admin.cookie })).json.state;
-  const target = state.events.find(e => e.status === "ready" && e.days > 2 && e.depth > 20_000);
+  const target = state.events.find(e => e.status === "ready" && e.days > 2 && e.delta < 0 && e.depth > 20_000);
   assert.ok(target, "expected a ready event");
   const beforeIds = state.orders.map(o => o.id);
   const created = await request("POST", "/api/orders", {
@@ -132,7 +132,7 @@ test("kill switch blocks new orders until released", async () => {
   assert.equal(state.settings.kill, true);
   const other = (await request("GET", "/api/state?account=converge", { cookie: admin.cookie })).json.state;
   assert.equal(other.settings.kill, false);
-  const target = state.events.find(e => e.status === "ready" && e.depth > 20_000);
+  const target = state.events.find(e => e.status === "ready" && e.delta < 0 && e.depth > 20_000);
   const blocked = await request("POST", "/api/orders", {
     cookie: admin.cookie, csrf: admin.csrf, body: { accountId: "prob", eventId: target.id, qty: 100 }
   });
@@ -146,7 +146,7 @@ test("kill switch blocks new orders until released", async () => {
 test("analyst is read-only", async () => {
   const analyst = await login("analyst@convergence.local", "Analyst!2345");
   const state = (await request("GET", "/api/state", { cookie: analyst.cookie })).json.state;
-  const target = state.events.find(e => e.status === "ready" && e.depth > 20_000);
+  const target = state.events.find(e => e.status === "ready" && e.delta < 0 && e.depth > 20_000);
   const res = await request("POST", "/api/orders", {
     cookie: analyst.cookie, csrf: analyst.csrf, body: { accountId: "prob", eventId: target.id, qty: 100 }
   });

@@ -297,7 +297,8 @@ export class Engine {
         dailyLossPct: ruleEnabled(rules, "daily-loss") ? dailyLossPct(this.repo, accountId, this.currentEquity(accountId)) : 0,
         dailyLossLimit: ruleValue(rules, "daily-loss", 1.5),
         venueLatencyMs: this.market.hlStatus.latencyMs ?? 0,
-        venueLatencyLimit: ruleEnabled(rules, "latency") ? ruleValue(rules, "latency", 800) : Number.POSITIVE_INFINITY
+        venueLatencyLimit: ruleEnabled(rules, "latency") ? ruleValue(rules, "latency", 800) : Number.POSITIVE_INFINITY,
+        boundedTail: ruleEnabled(rules, "bounded-tail")
       }));
   }
 

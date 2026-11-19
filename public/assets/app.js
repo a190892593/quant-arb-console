@@ -40,12 +40,17 @@ import { CONV as D, api, download } from "./store.js";
     reviews: [],
     orders: [],
     audit: [],
+    lang: localStorage.getItem("conv.lang") === "en" ? "en" : "zh",
+    scanMode: localStorage.getItem("conv.scanMode") !== "0",
+    railCollapsed: localStorage.getItem("conv.railCollapsed") === "1",
     opp: { q: "", cat: "all", minEdge: 2.5, horizon: "all", onlyReady: false, sortKey: "edge", sortDir: "desc" },
     cols: (() => {
       const base = { depth: true, hedge: true, conf: true, due: true, status: true };
       try { return { ...base, ...(JSON.parse(localStorage.getItem("conv.cols") || "{}")) }; } catch { return base; }
     })()
   };
+  document.documentElement.lang = app.lang === "en" ? "en" : "zh-CN";
+  document.querySelector(".app")?.classList.toggle("is-collapsed", app.railCollapsed);
 
   let ordSeq = 8841;
 
@@ -129,6 +134,7 @@ import { CONV as D, api, download } from "./store.js";
     if (app.kill && (d.status === "ready" || d.status === "active")) return '<span class="chip chip-neg">熔断中</span>';
     if (!paperEnabled() && d.status === "ready") return '<span class="chip chip-mute">模拟暂停</span>';
     if (d.status === "watch" && d.statusText === "结算冻结") return '<span class="chip chip-warn">结算冻结</span>';
+    if (d.status === "watch" && d.statusText === "尾部无界") return '<span class="chip chip-neg">尾部无界</span>';
     if (d.status === "watch" && d.statusText === "临近结算") return '<span class="chip chip-warn">临近结算</span>';
     if (d.status === "watch" && d.statusText === "场所延迟") return '<span class="chip chip-warn">场所延迟</span>';
     if (d.status === "watch" && d.statusText === "日亏损降档") return '<span class="chip chip-neg">日亏损</span>';
@@ -154,6 +160,269 @@ import { CONV as D, api, download } from "./store.js";
     const u = ruleById(id)?.unit;
     return u === "days" ? "天" : u === "pct" ? "%" : u === "usd" ? "USDC" : u === "ms" ? "ms" : u === "bps" ? "bps" : u === "shares" ? "股" : u === "x" ? "x" : u === "sec" ? "秒" : u === "score" ? "/100" : "";
   };
+
+  const COIN_ZH = [
+    ["Bitcoin Cash", "比特币现金"], ["Bitcoin", "比特币"], ["Ethereum", "以太坊"],
+    ["Solana", "Solana"], ["Dogecoin", "狗狗币"], ["Hyperliquid", "Hyperliquid"],
+    ["Chainlink", "Chainlink"], ["Avalanche", "Avalanche"], ["Cardano", "Cardano"],
+    ["Polygon", "Polygon"], ["Litecoin", "Litecoin"], ["XRP", "XRP"], ["BNB", "BNB"]
+  ];
+  const MONTH_ZH = {
+    January: "1 月", February: "2 月", March: "3 月", April: "4 月", May: "5 月", June: "6 月",
+    July: "7 月", August: "8 月", September: "9 月", October: "10 月", November: "11 月", December: "12 月"
+  };
+  function zhDateText(raw) {
+    if (!raw) return "";
+    const s = raw.trim().replace(/\s+/g, " ");
+    let m = s.match(/^([A-Za-z]+)\s+(\d{1,2})(?:,\s*(\d{4}))?$/);
+    if (m && MONTH_ZH[m[1]]) return (m[3] ? m[3] + " 年 " : "") + MONTH_ZH[m[1]] + " " + m[2] + " 日";
+    m = s.match(/^([A-Za-z]+)\s+(\d{4})$/);
+    if (m && MONTH_ZH[m[1]]) return m[2] + " 年 " + MONTH_ZH[m[1]];
+    m = s.match(/^(\d{4})$/);
+    return m ? m[1] + " 年" : s;
+  }
+  function zhSubject(raw) {
+    let s = raw.replace(/\bthe price of\b/i, "").replace(/\bprice\b/gi, "价格").trim();
+    for (const [en, zh] of COIN_ZH) s = s.replace(new RegExp("\\b" + en + "\\b", "gi"), zh);
+    s = s.replace(/\s+价格/g, "价格").replace(/价格\s+/g, "价格").replace(/\s+/g, " ").trim();
+    if (/[\u4e00-\u9fff]/.test(s)) {
+      if (!/价格/.test(s) && /^(比特币|以太坊|狗狗币|比特币现金|Solana|XRP|BNB|Hyperliquid|Chainlink|Avalanche|Cardano|Polygon|Litecoin)$/.test(s)) s += "价格";
+      return s;
+    }
+    return null;
+  }
+  /** Translate the common Polymarket crypto event templates into Chinese. */
+  function translateEventTitle(title) {
+    if (!title || /[\u4e00-\u9fff]/.test(title)) return null;
+    const t = title.trim().replace(/\s+/g, " ");
+    const datePart = (prep, date) => {
+      const d = zhDateText(date);
+      if (!d) return "";
+      return prep.toLowerCase() === "by" ? "在 " + d + "前" : "在 " + d;
+    };
+    let m = t.match(/^Will the price of (.+?) be (above|over|below|under)\s+\$?([\d,.]+)(?:\s+(on|by|in)\s+(.+?))?\?$/i);
+    if (m) {
+      const subject = zhSubject(m[1] + " price");
+      if (!subject) return null;
+      return `${subject}是否${datePart(m[4] || "", m[5] || "")}${m[2].toLowerCase().match(/above|over/) ? "高于" : "低于"} $${m[3]}？`;
+    }
+    m = t.match(/^Will (.+?) (reach|hit|exceed|be above|be below|dip to|drop to|fall to|dip below|drop below|fall below|touch|close above|close below)\s+\$?([\d,.]+)\s+([A-Za-z]+)\s+(\d{1,2})\s*[-–]\s*(\d{1,2})\?$/i);
+    if (m) {
+      const subject = zhSubject(m[1]);
+      if (!subject) return null;
+      const verb = m[2].toLowerCase();
+      const verbZh = /dip to|drop to|fall to/.test(verb) ? "跌至" : /be above/.test(verb) ? "高于" : /be below/.test(verb) ? "低于" : /reach|hit/.test(verb) ? "达到" : /exceed/.test(verb) ? "超过" : /dip|drop|fall/.test(verb) ? "跌破" : /touch/.test(verb) ? "触及" : "收于";
+      const start = zhDateText(m[4] + " " + m[5]).replace(" 日", "");
+      return `${subject}是否在 ${start}–${m[6]} 日${verbZh} $${m[3]}？`;
+    }
+    m = t.match(/^Will (.+?) (be above|be below|reach|hit|exceed|dip to|drop to|fall to|dip below|drop below|fall below|touch|close above|close below)\s+\$?([\d,.]+)(?:\s+(on|by|in)\s+(.+?))?\?$/i);
+    if (m) {
+      const subject = zhSubject(m[1]);
+      if (!subject) return null;
+      const verb = m[2].toLowerCase();
+      const verbZh = /dip to|drop to|fall to/.test(verb) ? "跌至" : /be above/.test(verb) ? "高于" : /be below/.test(verb) ? "低于" : /reach|hit/.test(verb) ? "达到" : /exceed/.test(verb) ? "超过" : /dip|drop|fall/.test(verb) ? "跌破" : /touch/.test(verb) ? "触及" : /close above/.test(verb) ? "收于" : "收于";
+      const suffix = /close above/.test(verb) ? "上方" : /close below/.test(verb) ? "下方" : "";
+      return `${subject}是否${datePart(m[4] || "", m[5] || "")}${verbZh} $${m[3]}${suffix}？`;
+    }
+    return null;
+  }
+  function eventTitleHtml(title) {
+    const zh = app.lang === "zh" ? translateEventTitle(title) : null;
+    return '<span class="title-en">' + esc(title) + "</span>" + (zh ? '<span class="title-zh">' + esc(zh) + "</span>" : "");
+  }
+
+  /* ---------------- zh / en interface layer ----------------
+     The English layer translates the terminal shell, scanner and detail labels in place.
+     It deliberately leaves user/data content and untranslated admin prose untouched. */
+  const EN_PHRASES = {
+    "跨场所事件套利": "Cross-venue event arbitrage",
+    "Polymarket 事件合约与 Hyperliquid 永续之间的概率定价差，正在被自动收敛。": "Probability mispricing between Polymarket event contracts and Hyperliquid perps, converging automatically.",
+    "一个策略一个账户：资金、持仓、限额、规则和熔断互不共享。切换账户会切换整个操作台。": "One strategy per account: capital, positions, limits, rules and kill switches are isolated. Switching accounts switches the whole terminal.",
+    "用 Hyperliquid 波动率曲面反推数字期权价格，与 Polymarket 最优卖价比较，扣除两腿成本后排序。": "Derive digital-option fair value from the Hyperliquid vol surface, compare with Polymarket asks, then rank after two-leg costs.",
+    "合约腿成交后 800ms 内完成永续对冲；任一腿偏离计划都会被标记，超过 5 分钟交还人工。": "Hedge the perp leg within 800ms of the contract fill; any leg deviation is flagged and handed to a human after 5 minutes.",
+    "每个事件合约都配一条永续对冲腿；比例低于 90% 标黄，低于 75% 自动降仓。": "Every event contract carries a perp hedge; below 90% is amber, below 75% auto-reduces.",
+    "限额在成交前校验、成交后复核。任何一条规则触发都会降档，只有人工确认才能恢复满仓。": "Limits are checked before and after fills. Any rule trigger steps down risk; only human confirmation restores full size.",
+    "账户、用户、场所、引擎、事件、风控、审计与数据。管理与交易共用同一会话，切回终端即可继续交易。": "Accounts, users, venues, engine, events, risk, audit and data. Admin and trading share one session; return to the terminal to keep trading.",
+    "总览": "Overview", "账户": "Accounts", "机会扫描": "Scanner", "执行台": "Execution",
+    "持仓": "Positions", "风控": "Risk", "管理": "Admin",
+    "当前账户": "Current account", "自营主账户": "Prop account", "切换账户": "Switch account",
+    "引擎在线": "Engine online", "持仓同步": "Position sync", "进入管理": "Admin console",
+    "语言": "Language", "折叠菜单": "Collapse menu", "展开菜单": "Expand menu", "切换到中文": "Switch to Chinese",
+    "实时行情": "Live market", "纸面": "Paper", "实盘": "Live", "模拟暂停": "Paper paused",
+    "模拟交易": "Paper trading", "自动执行": "Auto-execute", "熔断": "Kill switch", "已熔断": "Killed",
+    "扫描暂停": "Scan paused", "纸面撮合": "Paper fills", "实盘执行": "Live execution",
+    "已接入": "Connected", "不可达": "Unavailable", "运行": "Running", "个场所已接入": "venues connected", "在线": "Online",
+    "即时扫描": "Scan now", "立即扫描": "Scan now", "刷新": "Refresh", "刷新快照": "Refresh snapshot",
+    "全部平仓": "Flatten all", "同步场所": "Sync venues", "熔断本账户": "Kill this account",
+    "只做 2–60 天事件；买入被低估的 YES，用永续空头对冲 Delta，持有到收敛或结算。": "2–60 day events; buy underpriced YES, hedge delta with a perp short, hold to convergence or settlement.",
+    "只做 2–60 天事件；买入被低估的 YES，用永续空头对冲 Delta，持有到收敛或结算。 ": "2–60 day events; buy underpriced YES, hedge delta with a perp short, hold to convergence or settlement.",
+    "已覆盖事件": "Markets covered", "通过净边阈值": "Above net-edge threshold",
+    "盘口资金": "Book liquidity", "中位净边": "Median net edge", "模型": "Model",
+    "满足条件的事件会进入自动执行队列，巨边与低置信度除外": "Qualifying events enter the auto-execution queue; fat edges and low confidence are excluded.",
+    "搜索事件、标的或来源": "Search event, underlying or source",
+    "全部": "All", "山寨币": "Altcoins", "相对价值": "Relative value",
+    "净边 ≥": "Net edge ≥", "到期": "Expiry", "仅可执行": "Executable only",
+    "列显示": "Columns", "显示": "Showing", "条": "rows", "盘口合计": "Book total",
+    "预期净边": "Expected net edge", "可横向滚动": "Scroll horizontally",
+    "点击任意行查看定价拆解与两腿计划": "Click a row to inspect pricing and the two-leg plan",
+    "事件": "Event", "PM 卖价 / HL 公允": "PM ask / HL fair", "可成交": "Liquidity",
+    "对冲腿": "Hedge", "置信度": "Confidence", "状态": "Status",
+    "可执行": "Ready", "观察": "Watch", "待复核": "Review", "执行中": "Active",
+    "结算冻结": "Settlement freeze", "场所延迟": "Venue latency", "日亏损": "Daily loss",
+    "临近结算": "Near expiry", "扫描中": "Scanning", "已暂停": "Paused",
+    "扫描雷达": "Scan radar", "扫描动画": "Radar animation", "等待扫描数据": "Waiting for scan data",
+    "个机会": "opportunities", "动画已暂停": "animation paused",
+    "可开": "open", "仓": "slots", "盘口": "Book", "做空": "Short", "做多": "Long",
+    "扫描": "Scan", "扫描节拍": "Scan cadence", "最后更新": "Last update",
+    "运行": "Running", "分钟": "min", "小时": "hours",
+    "只买公充概率 ≥ 82% 且剩余 ≤ 72 小时的合约；尾部用永续做小比例对冲。": "Buy contracts with fair probability ≥ 82% and ≤ 72h to expiry; hedge the tail with a small perp position.",
+    "只做 14 天内事件；抢陈旧卖价并立刻用永续对冲，吃报价追平前的瞬时差；持有以分钟计。": "Trade events within 14 days; lift stale asks and hedge immediately with a perp, capturing the gap before quotes catch up; hold for minutes.",
+    "只做 60 天以上事件；按 90 日已实现波动率加溢价建模，买入低估 YES 并用永续对冲。": "Trade events beyond 60 days; model with 90-day realized volatility plus a premium, buy underpriced YES and hedge with a perp.",
+    "概览": "Overview", "概念": "Overview",
+    "机会拆解": "Opportunity breakdown", "概率标尺": "Probability ruler",
+    "净边拆解": "Net edge breakdown", "两腿执行计划": "Two-leg plan",
+    "两腿情景盈亏": "Scenario P&L", "结算与模型风险": "Settlement & model risk",
+    "定价": "Pricing", "成本": "Cost", "计划": "Plan", "情景": "Scenario", "风险": "Risk",
+    "模型净期望": "Model expected", "表内最佳": "Best in table", "表内最差": "Worst in table",
+    "盈亏比 / 尾部": "P/L ratio / tail", "到期情景": "Expiry scenario",
+    "合约腿": "Contract leg", "对冲腿": "Hedge leg", "合计": "Total",
+    "建议数量": "Suggested size", "试算": "Simulate", "执行套利": "Execute",
+    "调整规则": "Adjust rules", "关闭": "Close", "行权价": "Strike", "归零": "Zero", "持平": "Flat",
+    "空头上行无上限": "Short perp has unlimited upside loss", "无上限": "Unbounded",
+    "模型净期望（按公允概率）": "Model expected (at fair probability)",
+    "限额与占用": "Limits & usage", "规则与阈值": "Rules & thresholds", "规则开关": "Rule switches",
+    "净值": "Equity", "已部署": "Deployed", "未实现": "Unrealized", "持仓 / 在途": "Positions / working",
+    "信号": "Signals", "限额占用": "Limit usage", "今日盈亏": "Today P&L",
+    "资金占用": "Capital used", "未对冲敞口": "Unhedged delta", "已实现盈亏": "Realized P&L",
+    "最大回撤": "Max drawdown", "活动机会": "Live opportunities", "净边中位数": "Median net edge",
+    "账户净值 · USDC": "Account equity · USDC", "合约腿损益": "Contract P&L", "对冲腿损益": "Hedge P&L",
+    "合计未实现": "Total unrealized", "系统状态": "System status", "执行模式": "Execution mode",
+    "扫描节拍": "Scan cadence", "报价延迟": "Quote latency", "今日成交": "Trades today", "自动执行率": "Auto-execution rate",
+    "风控护栏": "Risk guardrails", "风险预算": "Risk budget", "单场所敞口": "Venue exposure",
+    "Hyperliquid 保证金占用": "Hyperliquid margin", "组合净 Delta": "Net portfolio delta",
+    "7 日内结算敞口": "7-day settlement exposure", "单事件集中度": "Single-event concentration",
+    "机会雷达": "Opportunity radar", "查看全部机会": "View all opportunities", "净 Delta 敞口": "Net delta exposure",
+    "启动时间": "Uptime", "当前仓位": "Positions", "账户": "Accounts", "组合净值": "Portfolio equity",
+    "运行中账户": "Running accounts", "当前": "Current", "切换": "Switch", "独立账本": "Independent books",
+    "限额与占用": "Limits & usage", "规则与阈值": "Rules & thresholds", "结算风险日历": "Settlement calendar",
+    "风控事件流": "Risk event stream", "恢复默认": "Reset defaults", "熔断本账户": "Kill this account",
+    "立即扫描": "Scan now", "刷新快照": "Refresh snapshot", "导出日报": "Export daily report",
+    "全部平仓": "Flatten all", "同步场所": "Sync venues", "进行中订单": "Working orders",
+    "待接管": "Reviews", "今日成交名义": "Today's notional", "平均滑点": "Average slippage",
+    "执行台没有在跑的订单": "No working orders", "两腿都已完成或已平仓。新的套利会在扫描器里确认后出现在这里。": "Both legs are filled or flattened. New arbitrage appears here after confirmation.",
+    "总名义敞口": "Gross notional", "净 DELTA": "Net delta", "HYPERLIQUID 保证金": "Hyperliquid margin",
+    "未实现盈亏": "Unrealized P&L", "按标的敞口分布": "Exposure by underlying",
+    "按到期日资金占用": "Capital by expiry", "持仓明细": "Position detail",
+    "全部": "All", "对冲不足": "Under-hedged", "事件": "Event", "合约腿": "Contract",
+    "对冲腿": "Hedge", "对冲比例": "Hedge ratio", "到期": "Expiry",
+    "今日拦截": "Blocked today", "熔断": "Kills", "限额项": "Limits",
+    "投资组合": "Portfolio", "总权益": "Total equity", "年化": "APR",
+    "当前账户": "Current account", "自营": "Prop", "管理员": "Admin",
+    "账户规则": "Account guardrails", "对冲规则": "Hedge rules", "执行阈值": "Execution thresholds",
+    "自动执行": "Auto execution", "信号过滤": "Signal filters",
+    "日亏损降档": "Daily loss throttle", "报价延迟熔断": "Venue latency guard",
+    "结算前冻结加仓": "Settlement freeze", "巨边人工复核": "Fat-edge review",
+    "仅允许有界尾部": "Bounded tail only", "尾部风险": "Tail risk", "尾部无界": "Unbounded tail",
+    "拒绝空头永续 + 二元 YES 这类结算亏损无上限的结构；关闭后才会允许方向性尾部": "Reject structures such as short perp + binary YES with unlimited settlement loss; turn off to allow directional tails.",
+    "对冲缺口自动补足": "Auto hedge gap fill", "对冲缺口比例阈值": "Hedge gap ratio",
+    "单事件最大真实 Delta": "Max event delta", "最小合约腿数量": "Minimum contract shares",
+    "单笔最大净值占比": "Max order / equity", "人工下单盘口占比": "Manual book share",
+    "自动执行单笔净值占比": "Auto size / equity", "自动单笔名义上限": "Auto notional cap",
+    "盘口深度使用上限": "Book depth cap", "自动执行冷却": "Auto cooldown",
+    "最低置信度": "Minimum confidence", "最低盘口深度": "Minimum book depth",
+    "当日回撤达到阈值时停止开新仓，仅允许平仓与补对冲": "Stop new entries when today's drawdown reaches the threshold; only reduce or hedge.",
+    "任一场所心跳超过阈值立即暂停开仓，保留已有对冲": "Pause new entries when any venue heartbeat exceeds the threshold; keep existing hedges.",
+    "距结算小于阈值的事件只减不加；S2/S3 默认关闭，可在本账户打开": "Events inside the settlement window are reduce-only; off by default for S2/S3 but configurable per account.",
+    "毛边超过阈值时不自动执行，需人工确认以排除陈旧报价": "No auto-execution when gross edge exceeds the threshold; confirm manually to rule out stale quotes.",
+    "对冲缺口超过 max(本阈值, 目标对冲 × 比例阈值) 时自动补单": "Auto-fill when the hedge gap exceeds max(this amount, target hedge × ratio threshold).",
+    "目标对冲名义的比例阈值，与固定金额阈值取较大值": "Ratio threshold for the target hedge; the larger of this and the fixed amount is used.",
+    "事件真实 Delta 超过该倍数额度时拒绝建仓": "Reject entries when the event's true delta exceeds this multiple of face value.",
+    "低于该股数的订单直接拒绝；这是硬约束": "Reject orders below this share count; this is a hard limit.",
+    "单笔订单合约成本不得超过账户当前净值的比例": "Cap a single order's contract cost as a share of current equity.",
+    "人工执行默认使用的 Polymarket 盘口深度比例": "Share of Polymarket book depth used for manual execution.",
+    "自动引擎单笔目标成本占账户净值的比例": "Target contract cost of one auto order as a share of equity.",
+    "自动引擎单笔合约成本上限，避免高净值时单笔过大": "Absolute cap on one auto order's contract cost at higher equity.",
+    "自动订单最多使用 Polymarket 盘口深度的比例": "Maximum share of Polymarket book depth used by an auto order.",
+    "同一账户两笔自动开仓之间的最小间隔": "Minimum interval between two auto entries in the same account.",
+    "信号置信度低于该分数时只观察，不进入可执行队列": "Signals below this confidence stay in watch mode, not the executable queue.",
+    "Polymarket 可成交深度低于该金额时只观察": "Markets with less executable Polymarket depth stay in watch mode.",
+    "硬约束": "Hard limit", "恢复默认": "Reset defaults", "全部平仓": "Flatten all",
+    "进行中": "Working", "待接管": "Reviews", "审计日志": "Audit log",
+    "概念": "Overview", "用户与权限": "Users & roles", "策略账户": "Strategy accounts",
+    "场所连接": "Venues", "策略与引擎": "Strategy & engine", "事件目录": "Event catalog",
+    "风控配置": "Risk config", "数据与导出": "Data & export",
+    "概率偏差": "Probability edge", "结算收敛": "Convergence", "报价滞后": "Quote lag", "长端波动率": "Long vol",
+    "BTC 价格": "BTC price", "ETH 价格": "ETH price",
+    "今天": "Today", "今日": "Today", "昨天": "Yesterday",
+    "股": "shares", "天": "days", "小时": "hours", "分钟": "min", "条腿": "legs",
+    "个事件": "events", "次": "times", "后结算": "to expiry"
+  };
+  const EN_KEYS = Object.keys(EN_PHRASES).sort((a, b) => b.length - a.length);
+  function translatePhrase(text) {
+    if (!text || !/[\u4e00-\u9fff]/.test(text)) return text;
+    let out = text;
+    for (const zh of EN_KEYS) out = out.split(zh).join(EN_PHRASES[zh]);
+    out = out.replace(/\b(\d+) (days|hours|slots|shares|events|minutes)\b/gi, (_, n, unit) =>
+      n + " " + (Number(n) === 1 ? unit.replace(/s$/i, "") : unit));
+    return out;
+  }
+  let applyingLang = false;
+  let langScheduled = false;
+  function applyLang() {
+    if (app.lang !== "en" || applyingLang) return;
+    applyingLang = true;
+    try {
+      const root = document.querySelector(".app") || document.body;
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+        acceptNode(node) {
+          const p = node.parentElement;
+          if (!p || /^(SCRIPT|STYLE|TEXTAREA)$/.test(p.tagName)) return NodeFilter.FILTER_REJECT;
+          if (p.closest(".title-zh, [data-no-i18n]")) return NodeFilter.FILTER_REJECT;
+          return /[\u4e00-\u9fff]/.test(node.nodeValue || "") ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+        }
+      });
+      const nodes = [];
+      while (walker.nextNode()) nodes.push(walker.currentNode);
+      for (const node of nodes) {
+        const translated = translatePhrase(node.nodeValue);
+        if (translated !== node.nodeValue) node.nodeValue = translated;
+      }
+      document.querySelectorAll("[placeholder],[title],[aria-label]").forEach(el => {
+        if (el.closest("[data-no-i18n]")) return;
+        for (const attr of ["placeholder", "title", "aria-label"]) {
+          const value = el.getAttribute(attr);
+          if (value && /[\u4e00-\u9fff]/.test(value)) el.setAttribute(attr, translatePhrase(value));
+        }
+      });
+    } finally {
+      applyingLang = false;
+    }
+  }
+  function scheduleLang() {
+    if (app.lang !== "en" || langScheduled) return;
+    langScheduled = true;
+    setTimeout(() => { langScheduled = false; applyLang(); }, 60);
+  }
+  function startLangObserver() {
+    if (app.lang !== "en") return;
+    new MutationObserver(scheduleLang).observe(document.body, { childList: true, subtree: true, characterData: true });
+    scheduleLang();
+  }
+  function setLanguage(lang) {
+    localStorage.setItem("conv.lang", lang);
+    location.reload();
+  }
+  function syncLangButtons() {
+    document.documentElement.lang = app.lang === "en" ? "en" : "zh-CN";
+    $$("#rail-tools [data-lang]").forEach(b => b.classList.toggle("is-on", b.dataset.lang === app.lang));
+    const mobile = $("#lang-mobile");
+    if (mobile) {
+      mobile.textContent = app.lang === "en" ? "中" : "EN";
+      mobile.title = app.lang === "en" ? "切换到中文" : "Switch to English";
+    }
+    const collapse = $("#rail-collapse");
+    if (collapse) collapse.title = app.railCollapsed ? "展开菜单" : "折叠菜单";
+  }
 
   function book() { return D.book(); }
 
@@ -391,7 +660,8 @@ import { CONV as D, api, download } from "./store.js";
     const maxDelta = ruleOn("max-delta") ? ruleVal("max-delta", 25) : Infinity;
     const deltaBlocked = Math.abs(d.delta) > maxDelta;
     const statusBlocked = d.status === "watch";
-    const canExecute = !app.kill && paperEnabled() && d.net > 0 && !statusBlocked && !settleBlocked && !deltaBlocked && !sizeBlocked;
+    const tailBlocked = d.kind !== "complete" && ruleOn("bounded-tail") && d.delta > 0;
+    const canExecute = !app.kill && paperEnabled() && d.net > 0 && !statusBlocked && !settleBlocked && !deltaBlocked && !sizeBlocked && !tailBlocked;
     const costs = [
       ["PM 点差", d.spreadBps],
       ["HL 手续费", d.feeBps],
@@ -481,7 +751,7 @@ import { CONV as D, api, download } from "./store.js";
           '<div class="eyebrow">机会拆解 · ' + esc(d.cat) + "</div>" +
           '<button class="x-btn" data-close-drawer aria-label="关闭"><svg class="ic"><use href="#i-x"/></svg></button>' +
         "</div>" +
-        '<h2 class="drawer-title" id="drawer-title">' + esc(d.title) + "</h2>" +
+        '<h2 class="drawer-title" id="drawer-title">' + eventTitleHtml(d.title) + "</h2>" +
         '<div class="drawer-meta">' + statusChip(d) +
           '<span class="chip">' + esc(d.und) + " 永续对冲</span>" +
           "<span class=\"muted\" style=\"font-size:10.5px\">" + daysText(d.days) + "后结算 · " + esc(d.src) + "</span>" +
@@ -564,7 +834,9 @@ import { CONV as D, api, download } from "./store.js";
             note("来源", "结算价取自 " + esc(d.src) + "，UMA 乐观预言机有 2 小时争议窗口；争议期间头寸无法提前退出。") +
             note("模型", "公允概率由 HL 永续与期权曲面反推的数字期权价格，置信度 <b>" + d.conf + "/100</b>；低于 " + ruleVal("min-confidence", 62) + " 不自动执行。") +
             note("流动性", "盘口资金 <b>" + usd(d.depth, 0) + "</b>，人工单默认使用 " + manualDepthPct + "% 深度，超过该规模的订单预计滑点上升 3–8bps。") +
-            note("规则检查", settleBlocked
+            note("规则检查", tailBlocked
+              ? "该结构为 <b>买入看涨二元 + 做空永续</b>，标的上涨时亏损无上限；已启用「仅允许有界尾部」。到「风控 → 规则与阈值」可显式关闭该规则，但不建议用于低风险账户。"
+              : settleBlocked
               ? "结算冻结：距结算 <b>" + d.days.toFixed(1) + " 天</b>，当前阈值 <b>" + settleDays + " 天</b>；到「风控 → 规则与阈值」可调整。"
               : deltaBlocked
                 ? "真实 Delta <b>" + Math.abs(d.delta).toFixed(1) + "x</b> 超过单事件上限 <b>" + maxDelta + "x</b>；到「风控 → 规则与阈值」可调整。"
@@ -578,15 +850,16 @@ import { CONV as D, api, download } from "./store.js";
       '<div class="drawer-f">' +
         '<div class="df-sum"><span>预计净边捕获 · ' + qty.toLocaleString("en-US") + " 股</span><b" +
           (planProfit < 0 ? ' class="neg"' : "") + ">" + signedUsd(planProfit, 0) + "</b></div>" +
-        (settleBlocked || deltaBlocked || statusBlocked ? '<button class="btn btn-ghost btn-sm" id="drawer-rule-btn">调整规则</button>' : "") +
+        (settleBlocked || deltaBlocked || statusBlocked || tailBlocked ? '<button class="btn btn-ghost btn-sm" id="drawer-rule-btn">调整规则</button>' : "") +
         '<button class="btn btn-ghost btn-sm" id="simulate-btn">试算</button>' +
         '<button class="btn btn-primary" id="execute-btn"' + (canExecute ? "" : " disabled") + ">" +
-          (app.kill ? "熔断中" : !paperEnabled() ? "模拟暂停" : d.net <= 0 ? "净边为负" : sizeBlocked ? "限额不足最小股数" : settleBlocked ? "结算冻结 · <" + settleDays + "天" : deltaBlocked ? "Delta 超限" : statusBlocked ? d.statusText : "执行套利") + "</button>" +
+          (app.kill ? "熔断中" : !paperEnabled() ? "模拟暂停" : d.net <= 0 ? "净边为负" : sizeBlocked ? "限额不足最小股数" : tailBlocked ? "尾部无上限" : settleBlocked ? "结算冻结 · <" + settleDays + "天" : deltaBlocked ? "Delta 超限" : statusBlocked ? d.statusText : "执行套利") + "</button>" +
       "</div>";
 
     $("#drawer-root").hidden = false;
     document.body.classList.add("has-drawer");
     $("#drawer").focus();
+    if (app.lang === "en") scheduleLang();
     drawerUntrap = trapFocus($("#drawer"), prevFocus);
     $$("#drawer-tabs [data-drawer-goto]").forEach(btn => btn.addEventListener("click", () => {
       const section = $("#dsec-" + btn.dataset.drawerGoto);
@@ -607,6 +880,7 @@ import { CONV as D, api, download } from "./store.js";
       if (sizeBlocked) { toast("可执行数量不足", "按当前净值、单笔上限、集中度与场所限额最多只能买 " + executableMax.toLocaleString("en-US") + " 股，低于最小 " + minQty + " 股。", "warn"); return; }
       if (settleBlocked) { toast("结算冻结", "该事件距结算 " + d.days.toFixed(1) + " 天，低于当前规则阈值 " + settleDays + " 天，只允许减仓。到「风控」可调整阈值。", "warn"); return; }
       if (deltaBlocked) { toast("Delta 超限", "真实 Delta " + Math.abs(d.delta).toFixed(1) + "x 超过当前上限 " + maxDelta + "x。到「风控」可调整阈值。", "warn"); return; }
+      if (tailBlocked) { toast("尾部亏损无上限", "该结构是买入看涨二元 + 做空永续：标的上涨时空头亏损不封顶。低风险模式禁止这类结构；需要有限亏损请用看涨期权/价差封顶。", "neg"); return; }
       executeModal(d, qty, planProfit);
     });
     const ruleBtn = $("#drawer-rule-btn");
@@ -799,6 +1073,7 @@ import { CONV as D, api, download } from "./store.js";
     if (!a.enabled) return { cls: "chip-mute", label: "已停用", dot: "", tone: "" };
     if (a.kill) return { cls: "chip-neg", label: "已熔断", dot: "bad", tone: "neg" };
     if (!a.auto) return { cls: "chip-warn", label: "自动暂停", dot: "warn", tone: "warn" };
+    if (a.id === "complete" && !a.signals) return { cls: "chip-warn", label: "等待配对", dot: "warn", tone: "warn" };
     return { cls: "chip-ok", label: "运行中", dot: "ok", tone: "ok" };
   }
 
@@ -852,7 +1127,7 @@ import { CONV as D, api, download } from "./store.js";
       mode.innerHTML = '<span class="dot ' + (live ? "warn" : sim ? "" : "bad") + '"></span>' + (live ? "实盘" : sim ? "纸面" : "模拟暂停");
     }
     const sub = $("#acct-sub");
-    if (sub) sub.innerHTML = '<span class="dot ok"></span>独立账本 · 4 个账户互不共享';
+    if (sub) sub.innerHTML = '<span class="dot ok"></span>独立账本 · ' + app.accounts.length + ' 个账户互不共享';
   }
 
   function accountCard(a) {
@@ -996,6 +1271,7 @@ import { CONV as D, api, download } from "./store.js";
     renderAccountChrome(); renderAccounts();
     renderOverview(); renderTable(); renderOrders(); renderReviews(); renderPositions(); renderRisk(); renderAudit();
     if (app.route === "execution") { renderOrders(); renderReviews(); renderAudit(); }
+    if (app.lang === "en") scheduleLang();
   }
 
   /* ---------------- overview ---------------- */
@@ -1125,7 +1401,7 @@ import { CONV as D, api, download } from "./store.js";
     $("#radar-list").innerHTML = top.map((d, i) =>
       '<button class="radar-row" data-open="' + d.id + '">' +
         '<span class="radar-rank">' + pad(i + 1) + "</span>" +
-        '<span class="radar-main"><span class="radar-title">' + esc(d.title) + "</span>" +
+        '<span class="radar-main"><span class="radar-title">' + eventTitleHtml(d.title) + "</span>" +
           '<span class="radar-meta"><span class="chip">' + esc(d.cat) + "</span><span>" + daysText(d.days) + "</span><span>·</span><span>可成交 " + compactUsd(d.depth) + "</span></span></span>" +
         '<span class="radar-pair"><span class="pair-mini"><span data-radar="ask">' + cents(d.ask) + "</span><em>PM</em></span>" +
           '<span class="pair-link"></span><span class="pair-mini"><span data-radar="fair">' + cents(d.fair) + "</span><em>HL</em></span></span>" +
@@ -1314,9 +1590,35 @@ import { CONV as D, api, download } from "./store.js";
     });
   }
 
+  function renderRadar() {
+    const radar = $("#scan-radar");
+    const blips = $("#radar-blips");
+    const sw = $("#scan-mode");
+    if (!radar || !blips) return;
+    const on = app.scanMode;
+    radar.classList.toggle("is-paused", !on);
+    if (sw) sw.setAttribute("aria-checked", String(on));
+    const state = $("#radar-state");
+    const meta = $("#radar-meta");
+    const rows = computed().filter(r => r.net >= D.MIN_EDGE_CENTS);
+    if (state) state.textContent = on ? "扫描中" : "已暂停";
+    if (meta) meta.textContent = on
+      ? rows.length + " 个机会 · 扫描 #" + Number(D.engine.scanSeq || 0).toLocaleString("en-US")
+      : rows.length + " 个机会 · 动画已暂停";
+    if (!on) return;
+    const top = rows.slice(0, 8);
+    blips.innerHTML = top.map((r, i) => {
+      const angle = ((r.und.charCodeAt(0) || 0) * 13 + i * 53) % 360 * Math.PI / 180;
+      const radius = 17 + Math.min(29, Math.abs(r.net) * 3.4 + i * 2.2);
+      const x = 50 + Math.cos(angle) * radius;
+      const y = 50 + Math.sin(angle) * radius;
+      const hot = r.status === "ready" || r.net >= 3.5;
+      return '<i class="radar-blip' + (hot ? " is-hot" : "") + '" style="left:' + x.toFixed(1) + "%;top:" + y.toFixed(1) + '%"></i>';
+    }).join("");
+  }
+
   function filterRows() {
-    const o = app.opp;
-    let rows = computed();
+    const o = app.opp;    let rows = computed();
     if (o.q) {
       const q = o.q.toLowerCase();
       rows = rows.filter(r => (r.title + r.cat + r.und + r.src).toLowerCase().indexOf(q) > -1);
@@ -1347,7 +1649,7 @@ import { CONV as D, api, download } from "./store.js";
     const tbody = $("#opp-body");
     tbody.innerHTML = rows.map(d =>
       '<tr data-id="' + d.id + '" tabindex="0">' +
-        '<td><div class="ev-cell"><div class="ev-title">' + esc(d.title) + "</div>" +
+        '<td><div class="ev-cell"><div class="ev-title">' + eventTitleHtml(d.title) + "</div>" +
           '<div class="ev-meta"><span class="chip">' + esc(d.cat) + "</span><span>" + daysText(d.days) + "</span>" +
           '<span class="sep"></span><span class="src">' + esc(d.src) + "</span></div></div></td>" +
         '<td class="num-col"><div class="pair-cell">' +
@@ -1370,7 +1672,7 @@ import { CONV as D, api, download } from "./store.js";
     if (cards) {
       cards.innerHTML = rows.map(d =>
         '<button class="opp-card" data-id="' + d.id + '">' +
-          '<span class="oc-top"><span class="oc-title">' + esc(d.title) + "</span>" + statusChip(d) + "</span>" +
+          '<span class="oc-top"><span class="oc-title">' + eventTitleHtml(d.title) + "</span>" + statusChip(d) + "</span>" +
           '<span class="oc-meta"><span class="chip">' + esc(d.cat) + "</span><span>" + daysText(d.days) + "</span><span>·</span><span>可成交 " + compactUsd(d.depth) + "</span></span>" +
           '<span class="oc-bottom"><span class="oc-pair">PM <b>' + cents(d.ask) + '</b><span class="oc-arrow">→</span>HL <b>' + cents(d.fair) + "</b></span>" +
             '<span class="oc-edge"><b' + (d.net < -0.005 ? ' class="neg"' : "") + ">" + signedCents(d.net) + "</b><small>" + bps(d.netBps) + " bps</small></span></span>" +
@@ -1397,6 +1699,13 @@ import { CONV as D, api, download } from "./store.js";
 
     const empty = rows.length === 0;
     $("#opp-empty").hidden = !empty;
+    if (empty) {
+      const isComplete = currentAcct()?.id === "complete";
+      if ($("#opp-empty-title")) $("#opp-empty-title").textContent = isComplete ? "暂无同结算的跨场所完整集" : "没有符合条件的标的";
+      if ($("#opp-empty-text")) $("#opp-empty-text").textContent = isComplete
+        ? "S5 只接受标的、行权价、结算时间与结算源完全一致的两条腿；当前没有满足条件的配对，因此不会生成伪套利。"
+        : "试着清空搜索词，或放宽净边阈值与到期窗口。";
+    }
     const oppScroll = $("#view-scanner .table-card .tbl-scroll");
     if (oppScroll) oppScroll.style.display = empty ? "none" : "";
 
@@ -1407,7 +1716,9 @@ import { CONV as D, api, download } from "./store.js";
       if (k) th.setAttribute("aria-sort", k === app.opp.sortKey ? (app.opp.sortDir === "asc" ? "ascending" : "descending") : "none");
     });
     applyCols();
+    renderRadar();
     renderNav();
+    if (app.lang === "en") scheduleLang();
   }
 
   function updateLiveCells() {
@@ -1495,7 +1806,7 @@ import { CONV as D, api, download } from "./store.js";
       return '<article class="order">' +
         '<div class="order-top"><div>' +
           '<div class="order-id">' + o.id + " · " + o.opened + " · " + esc(o.strategy) + "</div>" +
-          '<div class="order-title">' + esc(ev.title) + "</div>" +
+          '<div class="order-title">' + eventTitleHtml(ev.title) + "</div>" +
           '<div class="order-sub">' + chip + "<span>" + esc(ev.cat) + "</span><span>·</span><span>" + daysText(d.days) + "后结算</span></div>" +
         "</div>" +
         '<div class="order-right"><div class="order-notional"><b>' + usd(o.notional, 0) + "</b><small>合约腿名义</small></div></div></div>" +
@@ -1549,7 +1860,7 @@ import { CONV as D, api, download } from "./store.js";
       return '<article class="review" data-review="' + r.id + '">' +
         '<div class="review-top"><div>' +
           '<div class="review-reason"><svg class="ic"><use href="#i-alert"/></svg>' + esc(r.kind) + " · " + r.id + "</div>" +
-          '<div class="order-title">' + esc(ev.title) + "</div>" +
+          '<div class="order-title">' + eventTitleHtml(ev.title) + "</div>" +
           '<div class="order-sub"><span>' + esc(r.reason) + "</span></div>" +
         "</div>" +
         '<div style="text-align:right;flex:none"><span class="countdown" data-countdown="' + r.id + '">' + countdown(r.seconds) + "</span><small>自动平仓倒计时</small></div></div>" +
@@ -1650,7 +1961,7 @@ import { CONV as D, api, download } from "./store.js";
       const ratioCls = r.ratio < 0.85 ? "low" : r.ratio < 0.95 ? "mid" : "";
       const main =
         '<tr class="row-main' + (isOpen ? " is-expanded" : "") + '" data-pos="' + r.evId + '" tabindex="0" aria-expanded="' + (isOpen ? "true" : "false") + '">' +
-          '<td><div class="pos-title"><span class="ev-title">' + esc(r.ev.title) + "</span></div>" +
+          '<td><div class="pos-title"><span class="ev-title">' + eventTitleHtml(r.ev.title) + "</span></div>" +
             '<div class="pos-sub"><span class="chip">' + esc(r.ev.und) + "</span><span>" + esc(r.ev.cat) + "</span></div></td>" +
           '<td class="num-col"><div class="hedge-cell">' + Math.round(r.qty).toLocaleString("en-US") + " 股<small>" + cents(r.avg) + " → " + cents(r.mark) + "</small></div></td>" +
           '<td class="num-col"><div class="hedge-cell">' + usd(r.hedgeUsd, 0) + "<small>" + (r.hedgeSide === "long" ? "做多" : "做空") + " " + esc(r.ev.und) + " @ " + usd(r.hedgeEntry, 1) + "</small></div></td>" +
@@ -1825,7 +2136,7 @@ import { CONV as D, api, download } from "./store.js";
 
     $("#risk-calendar").innerHTML = rows.map(r =>
       '<div class="cal-row"><span class="cal-date">' + (r.ev.due ? dateShort(Date.parse(r.ev.due)) : "—") + "<small>" + (r.days < 1 ? "今日" : Math.round(r.days) + " 天后") + "</small></span>" +
-      '<span class="cal-title">' + esc(r.ev.title) + "<small>" + esc(r.note) + "</small></span>" +
+      '<span class="cal-title">' + eventTitleHtml(r.ev.title) + "<small>" + esc(r.note) + "</small></span>" +
       '<span class="cal-exp">' + compactUsd(r.exposure) + "<small>成本暴露</small></span></div>"
     ).join("");
   }
@@ -1942,7 +2253,7 @@ import { CONV as D, api, download } from "./store.js";
     $("#viewport").scrollTop = 0;
     const navList = $(".nav");
     if (navList) navList.scrollTop = 0;
-    document.title = "CONVERGENCE · " + titles[route];
+    document.title = "CONVERGENCE · " + (app.lang === "en" ? translatePhrase(titles[route]) : titles[route]);
     // 详情抽屉只属于扫描器：切到别的视图还挂着它，会遮住刚切过去的页面。
     if (!$("#drawer-root").hidden && route !== "scanner") closeDrawer();
     if (push !== false) history.replaceState(null, "", "#/" + route);
@@ -1959,6 +2270,7 @@ import { CONV as D, api, download } from "./store.js";
       const tab = parseHash().id || "overview";
       if (typeof window.__adminShow === "function") window.__adminShow(tab);
     }
+    if (app.lang === "en") applyLang();
   }
 
   window.addEventListener("hashchange", function () {
@@ -2008,7 +2320,7 @@ import { CONV as D, api, download } from "./store.js";
   });
   $("#acct-refresh").addEventListener("click", async () => {
     await D.refresh();
-    toast("快照已更新", "四个账户的净值、持仓与限额已重新同步。");
+    toast("快照已更新", "五个账户的净值、持仓与限额已重新同步。");
   });
 
   document.addEventListener("click", e => {
@@ -2124,6 +2436,15 @@ import { CONV as D, api, download } from "./store.js";
     app.opp.onlyReady = !app.opp.onlyReady;
     e.currentTarget.setAttribute("aria-checked", String(app.opp.onlyReady));
     renderTable();
+  });
+
+  $("#scan-mode").addEventListener("click", () => {
+    app.scanMode = !app.scanMode;
+    try { localStorage.setItem("conv.scanMode", app.scanMode ? "1" : "0"); } catch { /* storage may be disabled */ }
+    renderRadar();
+    toast(app.scanMode ? "扫描动画已开启" : "扫描动画已暂停",
+      app.scanMode ? "雷达会随每次扫描更新机会光点。" : "雷达扫描与光点已停止，数据表仍保留最后结果。",
+      app.scanMode ? "ok" : "warn");
   });
 
   const colMenu = $("#col-menu");
@@ -2487,6 +2808,18 @@ import { CONV as D, api, download } from "./store.js";
   $(".drawer-scrim").addEventListener("click", () => closeDrawer());
   $(".modal-scrim").addEventListener("click", () => closeModal());
 
+  $("#rail-collapse")?.addEventListener("click", () => {
+    app.railCollapsed = !app.railCollapsed;
+    try { localStorage.setItem("conv.railCollapsed", app.railCollapsed ? "1" : "0"); } catch { /* storage may be disabled */ }
+    $(".app")?.classList.toggle("is-collapsed", app.railCollapsed);
+    syncLangButtons();
+  });
+  $$("#rail-tools [data-lang]").forEach(btn => btn.addEventListener("click", () => {
+    const collapsed = $(".app")?.classList.contains("is-collapsed") || window.matchMedia("(max-width: 1200px)").matches;
+    setLanguage(collapsed ? (app.lang === "en" ? "zh" : "en") : btn.dataset.lang);
+  }));
+  $("#lang-mobile")?.addEventListener("click", () => setLanguage(app.lang === "en" ? "zh" : "en"));
+
   document.addEventListener("keydown", e => {
     if (e.key === "Escape") {
       closeAcctMenu();
@@ -2576,6 +2909,10 @@ import { CONV as D, api, download } from "./store.js";
     if (h.route === "scanner" && h.id && D.events.some(e => e.id === h.id)) {
       setTimeout(function () { openDrawer(h.id); }, 40);
     }
+
+    syncLangButtons();
+    applyLang();
+    startLangObserver();
 
     setInterval(tickClock, 1000);
     tickClock();

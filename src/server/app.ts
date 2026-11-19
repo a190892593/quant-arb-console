@@ -1,4 +1,4 @@
-import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
+﻿import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import fastifyCookie from "@fastify/cookie";
 import fastifyStatic from "@fastify/static";
 import rateLimit from "@fastify/rate-limit";
@@ -719,7 +719,7 @@ export async function buildServer(deps: ServerDeps): Promise<FastifyInstance> {
     }
     resetLiveBaseline(repo);
     await engine.refreshCatalog(actorOf(a));
-    repo.auditAdd({ t: nowClock(), actor: a.user.name, actorId: a.user.id, action: "重置数据", obj: "四账户纸面账本", venue: "管理", detail: "已清空纸面交易，四个账户各重置为 10,000 USDC，并重新拉取实时 Polymarket 目录" });
+    repo.auditAdd({ t: nowClock(), actor: a.user.name, actorId: a.user.id, action: "重置数据", obj: "五账户纸面账本", venue: "管理", detail: "已清空纸面交易，五个账户各重置为 10,000 USDC，并重新拉取实时 Polymarket 目录" });
     engine.emit("state");
     return { ok: true, state: stateFor(a, accountFrom(req)) };
   });

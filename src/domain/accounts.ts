@@ -67,6 +67,18 @@ export const ACCOUNT_DEFS: readonly AccountDef[] = [
     maxOpen: 2,
     defaultEquity: 10_000,
     defaultMinEdge: 3.0
+  },
+  {
+    id: "complete",
+    name: "跨场所完整集",
+    short: "CS",
+    desc: "同一事件在一家场所买 YES、在另一家场所买 NO，合计成本 < $1 时锁定结算收益。",
+    logic: "只接受标的、行权价、结算时间与结算源完全一致的两条腿；两腿成交后到期恒定收回 $1，不承担方向敞口。",
+    holdLabel: "到结算",
+    paperFillMs: 600,
+    maxOpen: 3,
+    defaultEquity: 10_000,
+    defaultMinEdge: 0.5
   }
 ];
 
@@ -131,6 +143,8 @@ export const CONVERGE_MIN_FAIR = 0.82;
 export function eligibleFor(id: AccountId, ev: EventContract, market: Market, now = Date.now()): boolean {
   const days = (Date.parse(ev.due) - now) / 86_400_000;
   if (days <= 0) return false;
+  if (id === "complete") return ev.kind === "complete";
+  if (ev.kind === "complete") return false;
   switch (id) {
     case "converge":
       return days <= CONVERGE_MAX_DAYS && ev.fair >= CONVERGE_MIN_FAIR && ev.fair <= 0.995;

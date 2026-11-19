@@ -29,6 +29,7 @@ export interface DeriveContext {
   dailyLossLimit?: number;
   venueLatencyMs?: number;
   venueLatencyLimit?: number;
+  boundedTail?: boolean;
 }
 
 export function clamp(v: number, a: number, b: number): number {
@@ -99,6 +100,9 @@ export function derive(ev: EventContract, ctx: DeriveContext = {}): DerivedEvent
   } else if (ctx.settleFreezeDays && ctx.settleFreezeDays > 0 && days < ctx.settleFreezeDays) {
     status = "watch";
     statusText = "结算冻结";
+  } else if (ctx.boundedTail && ev.delta > 0) {
+    status = "watch";
+    statusText = "尾部无界";
   } else if (ctx.venueLatencyMs != null && ctx.venueLatencyLimit != null && ctx.venueLatencyMs > ctx.venueLatencyLimit) {
     status = "watch";
     statusText = "场所延迟";

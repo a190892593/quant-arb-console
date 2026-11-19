@@ -16,6 +16,7 @@ export const RULE_DEFS: Rule[] = [
   { id: "gap-fill", name: "对冲缺口自动补足", desc: "对冲缺口超过 max(本阈值, 目标对冲 × 比例阈值) 时自动补单", on: true, value: 500, unit: "usd", min: 0, max: 100_000, step: 100, category: "对冲规则" },
   { id: "gap-fill-pct", name: "对冲缺口比例阈值", desc: "目标对冲名义的比例阈值，与固定金额阈值取较大值", on: true, value: 3, unit: "pct", min: 0, max: 50, step: 0.5, category: "对冲规则" },
   { id: "max-delta", name: "单事件最大真实 Delta", desc: "事件真实 Delta 超过该倍数额度时拒绝建仓", on: true, value: 25, unit: "x", min: 1, max: 50, step: 1, category: "执行阈值" },
+  { id: "bounded-tail", name: "仅允许有界尾部", desc: "拒绝空头永续 + 二元 YES 这类结算亏损无上限的结构；关闭后才会允许方向性尾部", on: true, category: "尾部风险" },
   { id: "min-qty", name: "最小合约腿数量", desc: "低于该股数的订单直接拒绝；这是硬约束", on: true, value: 100, unit: "shares", min: 100, max: 100_000, step: 100, category: "执行阈值", hard: true },
   { id: "max-order-pct", name: "单笔最大净值占比", desc: "单笔订单合约成本不得超过账户当前净值的比例", on: true, value: 25, unit: "pct", min: 1, max: 100, step: 1, category: "执行阈值" },
   { id: "manual-depth-pct", name: "人工下单盘口占比", desc: "人工执行默认使用的 Polymarket 盘口深度比例", on: true, value: 65, unit: "pct", min: 5, max: 100, step: 5, category: "执行阈值" },
@@ -125,6 +126,12 @@ export function checkOrder(input: OrderCheckInput): CheckResult {
   const rule = (id: string) => ruleEnabled(rules, id);
   if (rule("settle-freeze") && d.days < ruleValue(rules, "settle-freeze", 2)) {
     failures.push({ code: "settle_freeze", message: `结算前 ${ruleValue(rules, "settle-freeze", 2)} 天冻结加仓，只允许减仓。` });
+  }
+  if (rule("bounded-tail") && d.delta > 0) {
+    failures.push({
+      code: "unbounded_tail",
+      message: "该结构使用空头永续对冲看涨二元合约，标的上涨时亏损无上限；低风险模式只允许有界尾部。"
+    });
   }
   if (rule("fat-edge") && d.grossBps > ruleValue(rules, "fat-edge", 800) && source === "auto" && !ackFatEdge) {
     failures.push({ code: "fat_edge", message: `毛边超过 ${ruleValue(rules, "fat-edge", 800)}bps，需人工复核后才可执行。` });

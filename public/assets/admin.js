@@ -1,4 +1,4 @@
-/* ============================================================
+﻿/* ============================================================
    CONVERGENCE · admin console
    ============================================================ */
 
@@ -749,7 +749,7 @@ $("#export-json").addEventListener("click", async () => {
 $("#reset-data").addEventListener("click", () => {
   openModal({
     title: "重置交易账本？",
-    body: '<p class="admin-p">将清空持仓、订单、待接管、审计与净值曲线，四个账户回到起始资金，并重新拉取实时目录。用户、限额与规则保留。</p>' +
+    body: '<p class="admin-p">将清空持仓、订单、待接管、审计与净值曲线，五个账户回到起始资金，并重新拉取实时目录。用户、限额与规则保留。</p>' +
       '<div class="admin-field"><span>输入 RESET 确认</span><input id="reset-confirm" placeholder="RESET"></div>',
     actions: [
       { label: "取消" },

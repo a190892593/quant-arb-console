@@ -1,4 +1,4 @@
-import test from "node:test";
+﻿import test from "node:test";
 import assert from "node:assert/strict";
 import { derive, book } from "../dist/domain/pricing.js";
 import { checkOrder, DEFAULT_LIMITS, DEFAULT_RULES, validateLimitValue } from "../dist/domain/risk.js";
@@ -8,7 +8,7 @@ const now = Date.parse("2026-11-19T00:00:00Z");
 const event = {
   id: "e1", title: "BTC ≥ $100,000", cat: "BTC 价格", und: "BTC",
   due: new Date(now + 30 * day).toISOString(), ask: 0.4, bid: 0.39, fair: 0.46,
-  depth: 100_000, conf: 90, delta: 0.2, src: "test", source: "demo"
+  depth: 100_000, conf: 90, delta: -0.2, src: "test", source: "demo"
 };
 const market = { BTC: { px: 64_000, chg: 0 } };
 const d = derive(event, { now, market });
@@ -61,4 +61,11 @@ test("risk: limit cannot be set below current usage + 2%", () => {
   const limit = { id: "pm", name: "PM", desc: "", value: 1000, used: 500, kind: "usd" };
   assert.ok(validateLimitValue(limit, 500, 505));
   assert.equal(validateLimitValue(limit, 500, 600), null);
+});
+
+test("risk: bounded-tail blocks short-perp structures with unlimited upside loss", () => {
+  const up = derive({ ...event, delta: 0.2 }, { now, market });
+  const r = check({ event: up, source: "manual" });
+  assert.equal(r.ok, false);
+  assert.ok(r.failures.some(f => f.code === "unbounded_tail"));
 });

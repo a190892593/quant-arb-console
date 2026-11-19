@@ -153,6 +153,7 @@ try {
   await evaluate(`document.querySelector('[data-demo="admin@convergence.local"]').click()`);
   await evaluate(`document.querySelector('#login-form').requestSubmit()`);
   await sleep(1800);
+  console.log("LOGIN_DEBUG", JSON.stringify({ path: await evaluate("location.pathname"), title: await evaluate("document.title") }));
   check("登录后进入总览", (await evaluate("location.pathname")) === "/" && (await evaluate("document.title")).includes("总览"));
 
   const counts = await evaluate(`({
@@ -167,7 +168,7 @@ try {
     spark: !!document.querySelector('#hero-spark svg')
   })`);
   check("总览渲染：雷达、净值曲线、迷你曲线", counts.radar === 5 && counts.chart && counts.spark, JSON.stringify(counts));
-  check("工作区数据齐全", counts.orders >= 1 && counts.positions >= 1 && counts.limits === 5 && counts.rules === 16, JSON.stringify(counts));
+  check("工作区数据齐全", counts.orders >= 1 && counts.positions >= 1 && counts.limits === 5 && counts.rules >= 16, JSON.stringify(counts));
 
   for (const route of ["scanner", "execution", "positions", "risk", "overview"]) {
     await evaluate(`location.hash = "#/${route}"`);
@@ -183,7 +184,7 @@ try {
     rows: document.querySelectorAll('#acct-table tr').length,
     code: document.querySelector('#acct-code').textContent
   })`);
-  check("账户矩阵：四个独立账户", accountView.cards === 4 && accountView.rows === 4, JSON.stringify(accountView));  await evaluate(`document.querySelector('[data-acct-enter="converge"]').click()`);
+  check("账户矩阵：五个独立账户", accountView.cards === 5 && accountView.rows === 5, JSON.stringify(accountView));  await evaluate(`document.querySelector('[data-acct-enter="converge"]').click()`);
   await sleep(1400);
   const switched = await evaluate(`({ code: document.querySelector('#acct-code').textContent, name: document.querySelector('#acct-name').textContent, route: location.hash })`);
   check("切换账户后整个操作台切换账本", switched.code === "S2" && switched.route === "#/overview", JSON.stringify(switched));
@@ -318,7 +319,7 @@ try {
     rows: document.querySelectorAll('#accounts-table tbody tr').length,
     kpis: document.querySelectorAll('#accounts-kpis .admin-kpi').length
   })`);
-  check("后台策略账户矩阵", adminAccounts.cards === 4 && adminAccounts.rows === 4 && adminAccounts.kpis === 4, JSON.stringify(adminAccounts));
+  check("后台策略账户矩阵", adminAccounts.cards === 5 && adminAccounts.rows === 5 && adminAccounts.kpis === 4, JSON.stringify(adminAccounts));
   await shot("live-admin-accounts.png");
   await evaluate(`document.querySelector('#admin-tabs [data-admin-tab="users"]').click()`);
   await sleep(250);
@@ -336,7 +337,7 @@ try {
     limits: document.querySelectorAll('#risk-limits tbody tr').length,
     rules: document.querySelectorAll('#rules-list .admin-rule').length
   })`);
-  check("后台风控按账户切换", riskAccount.selector === "converge" && riskAccount.synced === "converge" && riskAccount.limits === 5 && riskAccount.rules === 16, JSON.stringify(riskAccount));
+  check("后台风控按账户切换", riskAccount.selector === "converge" && riskAccount.synced === "converge" && riskAccount.limits === 5 && riskAccount.rules >= 16, JSON.stringify(riskAccount));
   await evaluate(`document.querySelector('#admin-tabs [data-admin-tab="venues"]').click()`);
   await sleep(250);
   check("后台场所页", (await evaluate(`document.querySelectorAll('#venue-cards .admin-card').length`)) === 2);

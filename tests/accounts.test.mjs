@@ -17,10 +17,10 @@ function ev(days, overrides = {}) {
 }
 
 test("accounts: exactly four defs and equities sum to the desk total", () => {
-  assert.equal(ACCOUNT_DEFS.length, 4);
-  assert.deepEqual(ACCOUNT_DEFS.map(a => a.id), ["prob", "converge", "latency", "longvol"]);
+  assert.equal(ACCOUNT_DEFS.length, 5);
+  assert.deepEqual(ACCOUNT_DEFS.map(a => a.id), ["prob", "converge", "latency", "longvol", "complete"]);
   const sum = ACCOUNT_DEFS.reduce((s, a) => s + a.defaultEquity, 0);
-  assert.ok(Math.abs(sum - 40_000) < 0.005, String(sum));
+  assert.ok(Math.abs(sum - 50_000) < 0.005, String(sum));
   assert.equal(accountDef("latency").name, "报价滞后");
 });
 
@@ -53,7 +53,7 @@ test("eligibility: long-vol desk only trades beyond 60 days", () => {
 });
 
 test("eligibility: an expired contract is never eligible", () => {
-  for (const id of ["prob", "converge", "latency", "longvol"]) {
+  for (const id of ["prob", "converge", "latency", "longvol", "complete"]) {
     assert.equal(eligibleFor(id, ev(-1), market, now), false, id);
   }
 });
