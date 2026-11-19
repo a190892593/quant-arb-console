@@ -62,7 +62,11 @@ for (const r of rows) {
   console.log(`  ${r.ok ? "✓" : "!"} ${r.name.padEnd(30)} ${r.detail || ""}`);
 }
 const failures = rows.filter(r => !r.ok && !r.name.includes("Polymarket Gamma") && !r.name.includes("节点"));
-console.log("\n提示：Polymarket 在部分地区/网络不可达，服务会自动使用按 Hyperliquid 实时价格生成的示例盘口；这不是实盘数据。");
+if (pm.ok) {
+  console.log("\n提示：Polymarket 公共目录可达，服务会优先使用实时目录；若后续网络中断会自动降级并在界面标记。");
+} else {
+  console.log("\n提示：Polymarket 在部分地区/网络不可达，服务会自动使用按 Hyperliquid 实时价格生成的示例盘口；这不是实盘数据。");
+}
 if (failures.length) {
   console.log(`\n${failures.length} 项需要处理。`);
   process.exitCode = 1;
